@@ -36,6 +36,9 @@ import {
   Play,
   Pause,
   Code,
+  Columns,
+  ArrowUpRight,
+  ArrowDownRight,
 } from "lucide-react";
 
 // Danh mục Symbol thanh khoản cao chuẩn xác
@@ -242,7 +245,8 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
   const [activeTimeframe, setActiveTimeframe] = useState<string>("15m");
   const [selectedCategory, setSelectedCategory] = useState<number>(0);
   const [customInput, setCustomInput] = useState<string>("");
-  const [chartMode, setChartMode] = useState<"canvas" | "tradingview">("canvas");
+  const [chartMode, setChartMode] = useState<"canvas" | "tradingview" | "dual">("canvas");
+  const [lastTickDir, setLastTickDir] = useState<"up" | "down" | null>(null);
   const [refreshKey, setRefreshKey] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
 
@@ -661,9 +665,9 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
       .catch((err) => console.warn("Canvas fetch error:", err));
   }, [activeSymbol, activeTimeframe, refreshKey]);
 
-  // 3. Smooth Hardware-Accelerated Live Tick Engine (Zero DOM Re-creation, No Scroll Jump)
+  // 3. Smooth Hardware-Accelerated Live Tick Engine (Zero DOM Re-creation, Ultra-Responsive 450ms)
   useEffect(() => {
-    if (!isPlaying || chartMode !== "canvas") return;
+    if (!isPlaying || (chartMode !== "canvas" && chartMode !== "dual")) return;
     const interval = setInterval(() => {
       const currentList = candlesRef.current;
       if (!currentList || currentList.length === 0) return;
@@ -671,12 +675,15 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
       const lastIdx = currentList.length - 1;
       const last = { ...currentList[lastIdx] };
       const base = last.close;
-      const volatility = base > 1000 ? base * 0.0002 : base > 50 ? 0.06 : 0.00012;
-      const delta = (Math.random() - 0.492) * volatility;
+      const volatility = base > 1000 ? base * 0.00018 : base > 50 ? 0.05 : 0.0001;
+      const delta = (Math.random() - 0.495) * volatility;
       const decimals = base > 50 ? 2 : 5;
       const newClose = Number((last.close + delta).toFixed(decimals));
       const newHigh = Number(Math.max(last.high, newClose).toFixed(decimals));
       const newLow = Number(Math.min(last.low, newClose).toFixed(decimals));
+
+      const isUp = newClose >= last.close;
+      setLastTickDir(isUp ? "up" : "down");
 
       last.close = newClose;
       last.high = newHigh;
@@ -696,7 +703,7 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
         diff: Number(diff.toFixed(decimals)),
         pct: Number(((diff / first.open) * 100).toFixed(2)),
       });
-    }, 1000);
+    }, 450);
 
     return () => clearInterval(interval);
   }, [isPlaying, chartMode]);
@@ -730,13 +737,30 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
                 {isVi ? "DỮ LIỆU THỜI GIAN THỰC" : "REAL-TIME FEED"}
               </span>
             </div>
-            <div className="flex items-center gap-2 mt-1 font-mono">
-              <span className="text-xl font-bold text-txt-primary">
-                {livePrice > 0 ? livePrice : "—"}
+            <div className="flex items-center gap-3 mt-1 font-mono">
+              <span
+                className={`text-2xl font-bold font-mono tracking-tight px-2.5 py-0.5 rounded-xl transition-all duration-200 ${
+                  lastTickDir === "up"
+                    ? "text-gain bg-gain-subtle/60 ring-1 ring-gain/50 scale-105"
+                    : lastTickDir === "down"
+                    ? "text-loss bg-loss-subtle/60 ring-1 ring-loss/50 scale-105"
+                    : "text-txt-primary"
+                }`}
+              >
+                {livePrice > 0
+                  ? livePrice.toLocaleString("en-US", { minimumFractionDigits: livePrice > 50 ? 2 : 5 })
+                  : "—"}
               </span>
-              <span className={`text-xs font-bold ${priceChange.diff >= 0 ? "text-gain" : "text-loss"}`}>
-                {priceChange.diff >= 0 ? "+" : ""}{priceChange.diff} ({priceChange.pct >= 0 ? "+" : ""}{priceChange.pct}%)
-              </span>
+              <div
+                className={`flex items-center gap-1 text-xs font-mono font-bold px-2 py-1 rounded-lg ${
+                  priceChange.diff >= 0 ? "bg-gain-subtle text-gain" : "bg-loss-subtle text-loss"
+                }`}
+              >
+                {priceChange.diff >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                <span>
+                  {priceChange.diff >= 0 ? "+" : ""}{priceChange.diff} ({priceChange.pct >= 0 ? "+" : ""}{priceChange.pct}%)
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -750,7 +774,7 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
               placeholder={isVi ? "Tìm symbol (vd: XAUUSD, BTC, US30...)" : "Search symbol (e.g. XAUUSD, BTC...)"}
               value={customInput}
               onChange={(e) => setCustomInput(e.target.value)}
-              className="bg-bg-surface-subtle border border-border rounded-xl pl-9 pr-3 py-2 text-xs text-txt-primary placeholder-txt-muted focus:outline-none focus:border-brand-500 font-mono w-56 transition-colors"
+              className="bg-bg-surface-subtle border border-border rounded-xl pl-9 pr-3 py-2 text-xs text-txt-primary placeholder-txt-muted focus:outline-none focus:border-brand-500 font-mono w-52 transition-colors"
             />
             <Search className="w-4 h-4 text-txt-muted absolute left-3 pointer-events-none" />
           </form>
@@ -768,38 +792,55 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
             <RefreshCw className="w-4 h-4" />
           </button>
 
-          {/* Mode Switcher */}
+          {/* 2 Chart Modes + Dual Split Switcher */}
           <div className="flex rounded-xl bg-bg-surface-subtle p-1 border border-border">
             <button
               onClick={() => {
                 soundFX.playSwitch();
                 setChartMode("canvas");
               }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                 chartMode === "canvas"
                   ? "bg-brand-500 text-white shadow-sm"
                   : "text-txt-muted hover:text-txt-primary"
               }`}
             >
-              {isVi ? "Canvas Siêu Tốc" : "Fast Canvas"}
+              <Zap className="w-3.5 h-3.5" />
+              <span>{isVi ? "Canvas Siêu Tốc" : "Fast Canvas"}</span>
             </button>
             <button
               onClick={() => {
                 soundFX.playSwitch();
                 setChartMode("tradingview");
               }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                 chartMode === "tradingview"
                   ? "bg-brand-500 text-white shadow-sm"
                   : "text-txt-muted hover:text-txt-primary"
               }`}
             >
-              TradingView
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>TradingView</span>
+            </button>
+            <button
+              onClick={() => {
+                soundFX.playSwitch();
+                setChartMode("dual");
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                chartMode === "dual"
+                  ? "bg-brand-500 text-white shadow-sm"
+                  : "text-txt-muted hover:text-txt-primary"
+              }`}
+              title={isVi ? "Hiển thị đồng thời cả 2 loại giao diện biểu đồ" : "Display both chart modes side-by-side"}
+            >
+              <Columns className="w-3.5 h-3.5" />
+              <span>{isVi ? "Song Song (Dual 2 Loại)" : "Dual Split"}</span>
             </button>
           </div>
 
           {/* Play/Pause Button for Canvas */}
-          {chartMode === "canvas" && (
+          {(chartMode === "canvas" || chartMode === "dual") && (
             <button
               onClick={() => {
                 soundFX.playClick();
@@ -858,8 +899,8 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
         ))}
       </div>
 
-      {/* Timeframe & Indicators Toolbar (Canvas Mode) */}
-      {chartMode === "canvas" && (
+      {/* Timeframe & Indicators Toolbar (Canvas & Dual Modes) */}
+      {(chartMode === "canvas" || chartMode === "dual") && (
         <div className="flex flex-wrap items-center justify-between gap-3 bg-bg-surface-subtle p-2.5 rounded-2xl border border-border/60 font-mono text-xs">
           <div className="flex items-center gap-1">
             <span className="text-[10px] text-txt-muted uppercase font-bold mr-1.5">{isVi ? "Khung:" : "TF:"}</span>
@@ -958,9 +999,87 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
 
       {/* Chart View Container */}
       <div className="pt-2">
-        {chartMode === "canvas" ? (
+        {chartMode === "dual" ? (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* Column 1: Canvas Siêu Tốc */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-xs font-mono font-bold text-txt-primary flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-brand-500" />
+                  <span>{isVi ? "1. Giao Diện Canvas (Nạp Script Tùy Biến)" : "1. Fast Canvas (Script Studio)"}</span>
+                </span>
+                {activeIndicatorName && (
+                  <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-brand-500/15 text-brand-400 border border-brand-500/30 font-bold">
+                    ⚡ {activeIndicatorName}
+                  </span>
+                )}
+              </div>
+
+              {/* Floating HUD Scoreboard from Custom Script */}
+              {scriptResult && scriptResult.dashboard && scriptResult.dashboard.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 rounded-2xl bg-bg-surface/90 border border-brand-500/30 backdrop-blur-md font-mono text-xs">
+                  {scriptResult.dashboard.map((card, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-2 rounded-xl border flex flex-col justify-between ${
+                        card.variant === "gain"
+                          ? "bg-gain-subtle/40 text-gain border-gain/30"
+                          : card.variant === "loss"
+                          ? "bg-loss-subtle/40 text-loss border-loss/30"
+                          : card.variant === "brand"
+                          ? "bg-brand-500/10 text-brand-400 border-brand-500/30"
+                          : "bg-bg-surface-subtle text-txt-primary border-border/60"
+                      }`}
+                    >
+                      <span className="text-[9px] text-txt-muted uppercase font-bold tracking-wider truncate">
+                        {card.title}
+                      </span>
+                      <span className="text-sm font-bold my-0.5 truncate">{card.value}</span>
+                      {card.subtitle && (
+                        <span className="text-[9px] opacity-80 truncate">{card.subtitle}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div
+                ref={chartContainerRef}
+                style={{ minHeight: "580px" }}
+                className="w-full rounded-2xl overflow-hidden border border-border bg-bg-surface shadow-sm"
+              />
+            </div>
+
+            {/* Column 2: TradingView Pro Advanced Widget */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-xs font-mono font-bold text-txt-primary flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                  <span>{isVi ? "2. Giao Diện TradingView Pro (Chuẩn Quốc Tế)" : "2. TradingView Pro (Official)"}</span>
+                </span>
+                <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
+                  {activeSymbol}
+                </span>
+              </div>
+
+              <TradingViewAdvancedWidget
+                key={`tv-dual-${activeSymbol}-${refreshKey}`}
+                symbol={activeSymbol}
+                timeframe={
+                  activeTimeframe === "1D" ? "D" :
+                  activeTimeframe === "4h" ? "240" :
+                  activeTimeframe === "1h" ? "60" :
+                  activeTimeframe === "15m" ? "15" :
+                  activeTimeframe === "5m" ? "5" :
+                  activeTimeframe === "1m" ? "1" : "15"
+                }
+                height={580}
+              />
+            </div>
+          </div>
+        ) : chartMode === "canvas" ? (
           <div className="space-y-2">
-            {/* Floating HUD Scoreboard from Custom Script (e.g. Sniper SMC / Bull-Bear Score) */}
+            {/* Floating HUD Scoreboard from Custom Script */}
             {scriptResult && scriptResult.dashboard && scriptResult.dashboard.length > 0 && (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 rounded-2xl bg-bg-surface/90 border border-brand-500/30 backdrop-blur-md font-mono text-xs animate-fadeIn">
                 {scriptResult.dashboard.map((card, idx) => (
