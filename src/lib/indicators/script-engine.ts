@@ -398,7 +398,17 @@ export function transpilePineScriptToJS(pineCode: string): string {
   const namedArgRegex = new RegExp(`\\b(${PINE_NAMED_ARGS.join("|")})\\s*=\\s*`, "gi");
   code = code.replace(namedArgRegex, "");
 
-  // 4. Transpile Pine Multi-line Functions: `f_name(args) =>`
+  // 4. Strip generic type brackets in array constructor: `array.new < Type >(...)` -> `array.new(...)`
+  code = code.replace(/array\.new\s*<[^>]+>\s*\(/g, "array.new(");
+
+  // 5. Custom type definitions: `type Zone \n box b ...` -> factory object
+  code = code.replace(/^type\s+([a-zA-Z0-9_]+)\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = { new: (...args) => ({}) };\n");
+
+  // 6. Method declarations: `method in_out(...) => ...` -> `var in_out = ...`
+  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = ($2) => {};\n");
+  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm, "\nvar $1 = ($2) => { return $3; };\n");
+
+  // 7. Multi-line function declarations: `f_name(args) =>`
   code = code.replace(
     /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm,
     (match: string, funcName: string, args: string, body: string) => {
@@ -408,17 +418,17 @@ export function transpilePineScriptToJS(pineCode: string): string {
         .filter((line: string) => line.length > 0)
         .map((line: string) => (line.endsWith(";") ? line : line + ";"))
         .join("\n");
-      return `var ${funcName} = (${args}) => {\n${cleanBody}\n};\n`;
+      return `\nvar ${funcName} = (${args}) => {\n${cleanBody}\n};\n`;
     }
   );
 
   // Single-line arrow functions
   code = code.replace(
     /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm,
-    "var $1 = ($2) => { return $3; };"
+    "\nvar $1 = ($2) => { return $3; };"
   );
 
-  // 5. Handle Tuple Destructuring assignments: `[m, s, _] = ...` and `[_, _, adx] = ...`
+  // 8. Handle Tuple Destructuring assignments: `[m, s, _] = ...` and `[_, _, adx] = ...`
   // Use [^\S\r\n]* (horizontal whitespace only) so we NEVER consume newlines!
   let dummyCounter = 0;
   code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|let|const)?[^\S\r\n]*\[\s*([a-zA-Z0-9_, ]+)\s*\]\s*=/g, (match, inner) => {
@@ -433,38 +443,23 @@ export function transpilePineScriptToJS(pineCode: string): string {
     return `\nvar [${parts.join(", ")}] =`;
   });
 
-  // 6. Generic array definitions: `var Zone[] resZones = array.new<Zone>()`
-  code = code.replace(/\b(?:var|varip|let)?\s*[a-zA-Z0-9_]+\[\]\s+([a-zA-Z0-9_]+)\s*=\s*array\.new(?:<[^>]+>)?\(([^)]*)\)/g, "var $1 = array.new($2)");
-
-  // 7. Custom type definitions: `type Zone \n box b ...` -> factory object
-  code = code.replace(/^type\s+([a-zA-Z0-9_]+)\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "var $1 = { new: (...args) => ({}) };\n");
-
-  // 8. Method declarations: `method in_out(...) => ...` -> `var in_out = ...`
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "var $1 = ($2) => {};\n");
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm, "var $1 = ($2) => { return $3; };\n");
-
   // 9. Comma-separated variable declarations: `var float a = 0, var float b = 0`
-  code = code.replace(/,\s*(?:var|varip|let)?\s*(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)?\s*([a-zA-Z_0-9]+)\s*=/g, "; var $1 =");
+  code = code.replace(/,\s*(?:var|varip|let)?\s*(?:float|int|bool|string|color|series|simple|table|line|label|box|chart|[a-zA-Z0-9_]+)?\s*([a-zA-Z_0-9]+)\s*=/g, "; var $1 =");
 
-  // 10. Normal variable declarations (including table, line, label, box, chart)
-  code = code.replace(
-    /\b(?:var|varip)\s+(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)?\s*([a-zA-Z_0-9]+)\s*=/g,
-    "var $1 ="
-  );
-  code = code.replace(
-    /\b(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)\s+([a-zA-Z_0-9]+)\s*=/g,
-    "var $1 ="
-  );
-  code = code.replace(
-    /\b(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)\s+([a-zA-Z_0-9]+)\b/g,
-    "var $1"
-  );
+  // 10. Generic array definitions with user types: `var liq [] b_liq_B = ...` or `var FVG [] bFVG_UP = ...`
+  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*[a-zA-Z0-9_]+[^\S\r\n]*\[[^\S\r\n]*\][^\S\r\n]*([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $1 =");
 
-  // 11. Deduplicate consecutive var/let/const keywords
+  // 11. Type-annotated variable declarations: `var mss MSS = ...` or `var float x = ...` or `float x = ...`
+  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*([a-zA-Z0-9_]+)[^\S\r\n]+([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $2 =");
+
+  // 12. Single variable typed without initialization: `float x` or `var line l`
+  code = code.replace(/\b(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)\s+([a-zA-Z_0-9]+)\b/g, "var $1");
+
+  // 13. Deduplicate consecutive var/let/const keywords
   code = code.replace(/\b(?:var|let|const)\s+(?:var|let|const)\s+/g, "var ");
   code = code.replace(/\b(?:var|let|const)\s+(?:var|let|const)\s+/g, "var ");
 
-  // 12. Transpile Pine Operators
+  // 14. Transpile Pine Operators
   code = code.replace(/:=/g, "=");
   code = code.replace(/\band\b/g, "&&");
   code = code.replace(/\bor\b/g, "||");
@@ -770,87 +765,102 @@ export function executeCustomScript(
     input.source = (defVal: any) => defVal;
     input.session = (defVal: string) => defVal;
 
-    // Pine box module
-    const box = {
-      new: (left: any, top: any, right: any, bottom: any, ...rest: any[]) => ({
-        left,
-        top,
-        right,
-        bottom,
-        delete: () => {},
-        set_top: function (v: any) { this.top = v; },
-        set_bottom: function (v: any) { this.bottom = v; },
-        set_left: function (v: any) { this.left = v; },
-        set_right: function (v: any) { this.right = v; },
-        set_rightbottom: function (r: any, b: any) { this.right = r; this.bottom = b; },
-        set_lefttop: function (l: any, t: any) { this.left = l; this.top = t; },
+    // Pine box module (callable as type cast and object with methods)
+    const box = Object.assign(
+      (arg?: any) => (arg !== undefined ? arg : null),
+      {
+        new: (left: any, top: any, right: any, bottom: any, ...rest: any[]) => ({
+          left,
+          top,
+          right,
+          bottom,
+          delete: () => {},
+          set_top: function (v: any) { this.top = v; },
+          set_bottom: function (v: any) { this.bottom = v; },
+          set_left: function (v: any) { this.left = v; },
+          set_right: function (v: any) { this.right = v; },
+          set_rightbottom: function (r: any, b: any) { this.right = r; this.bottom = b; },
+          set_lefttop: function (l: any, t: any) { this.left = l; this.top = t; },
+          set_bgcolor: () => {},
+          set_border_style: () => {},
+          get_left: function () { return this.left; },
+          get_right: function () { return this.right; },
+          get_top: function () { return this.top; },
+          get_bottom: function () { return this.bottom; },
+        }),
+        delete: (bx: any) => { if (bx?.delete) bx.delete(); },
+        set_top: (bx: any, v: any) => { if (bx) bx.top = v; },
+        set_bottom: (bx: any, v: any) => { if (bx) bx.bottom = v; },
+        set_left: (bx: any, v: any) => { if (bx) bx.left = v; },
+        set_right: (bx: any, v: any) => { if (bx) bx.right = v; },
+        set_rightbottom: (bx: any, r: any, b: any) => { if (bx) { bx.right = r; bx.bottom = b; } },
+        set_lefttop: (bx: any, l: any, t: any) => { if (bx) { bx.left = l; bx.top = t; } },
         set_bgcolor: () => {},
         set_border_style: () => {},
-        get_left: function () { return this.left; },
-        get_right: function () { return this.right; },
-        get_top: function () { return this.top; },
-        get_bottom: function () { return this.bottom; },
-      }),
-      delete: (bx: any) => { if (bx?.delete) bx.delete(); },
-      set_top: (bx: any, v: any) => { if (bx) bx.top = v; },
-      set_bottom: (bx: any, v: any) => { if (bx) bx.bottom = v; },
-      set_left: (bx: any, v: any) => { if (bx) bx.left = v; },
-      set_right: (bx: any, v: any) => { if (bx) bx.right = v; },
-      set_rightbottom: (bx: any, r: any, b: any) => { if (bx) { bx.right = r; bx.bottom = b; } },
-      set_lefttop: (bx: any, l: any, t: any) => { if (bx) { bx.left = l; bx.top = t; } },
-      set_bgcolor: () => {},
-      set_border_style: () => {},
-    };
+      }
+    );
 
-    // Pine line module
-    const line = {
-      new: (x1: any, y1: any, x2: any, y2: any, ...rest: any[]) => ({
-        x1,
-        y1,
-        x2,
-        y2,
-        delete: () => {},
-        set_xy1: function (x: any, y: any) { this.x1 = x; this.y1 = y; },
-        set_xy2: function (x: any, y: any) { this.x2 = x; this.y2 = y; },
+    // Pine line module (callable as type cast and object with methods)
+    const line = Object.assign(
+      (arg?: any) => (arg !== undefined ? arg : null),
+      {
+        new: (x1: any, y1: any, x2: any, y2: any, ...rest: any[]) => ({
+          x1,
+          y1,
+          x2,
+          y2,
+          delete: () => {},
+          set_xy1: function (x: any, y: any) { this.x1 = x; this.y1 = y; },
+          set_xy2: function (x: any, y: any) { this.x2 = x; this.y2 = y; },
+          set_color: () => {},
+          set_x2: function (x: any) { this.x2 = x; },
+          get_x1: function () { return this.x1; },
+          get_x2: function () { return this.x2; },
+          get_y1: function () { return this.y1; },
+          get_y2: function () { return this.y2; },
+        }),
+        delete: (ln: any) => { if (ln?.delete) ln.delete(); },
+        set_xy1: (ln: any, x: any, y: any) => { if (ln) { ln.x1 = x; ln.y1 = y; } },
+        set_xy2: (ln: any, x: any, y: any) => { if (ln) { ln.x2 = x; ln.y2 = y; } },
         set_color: () => {},
-        set_x2: function (x: any) { this.x2 = x; },
-        get_x1: function () { return this.x1; },
-        get_x2: function () { return this.x2; },
-        get_y1: function () { return this.y1; },
-        get_y2: function () { return this.y2; },
-      }),
-      delete: (ln: any) => { if (ln?.delete) ln.delete(); },
-      set_xy1: (ln: any, x: any, y: any) => { if (ln) { ln.x1 = x; ln.y1 = y; } },
-      set_xy2: (ln: any, x: any, y: any) => { if (ln) { ln.x2 = x; ln.y2 = y; } },
-      set_color: () => {},
-      set_x2: (ln: any, x: any) => { if (ln) ln.x2 = x; },
-      style_solid: 0,
-      style_dashed: 1,
-      style_dotted: 2,
-    };
+        set_x2: (ln: any, x: any) => { if (ln) ln.x2 = x; },
+        style_solid: 0,
+        style_dashed: 1,
+        style_dotted: 2,
+      }
+    );
 
-    // Pine label module
-    const label = {
-      new: (x: any, y: any, txt: any, ...rest: any[]) => ({
-        x,
-        y,
-        text: txt,
-        delete: () => {},
-        set_xy: function (_x: any, _y: any) { this.x = _x; this.y = _y; },
-        set_text: function (t: any) { this.text = t; },
-        set_x: function (_x: any) { this.x = _x; },
-        set_color: () => {},
-        set_textcolor: () => {},
-      }),
-      delete: (lb: any) => { if (lb?.delete) lb.delete(); },
-      set_xy: (lb: any, x: any, y: any) => { if (lb) { lb.x = x; lb.y = y; } },
-      set_text: (lb: any, t: any) => { if (lb) lb.text = t; },
-      set_x: (lb: any, x: any) => { if (lb) lb.x = x; },
-      style_label_up: "up",
-      style_label_down: "down",
-      style_label_left: "left",
-      style_label_right: "right",
-    };
+    // Pine label module (callable as type cast and object with methods)
+    const label = Object.assign(
+      (arg?: any) => (arg !== undefined ? arg : null),
+      {
+        new: (x: any, y: any, txt: any, ...rest: any[]) => ({
+          x,
+          y,
+          text: txt,
+          delete: () => {},
+          set_xy: function (_x: any, _y: any) { this.x = _x; this.y = _y; },
+          set_text: function (t: any) { this.text = t; },
+          set_x: function (_x: any) { this.x = _x; },
+          set_color: () => {},
+          set_textcolor: () => {},
+        }),
+        delete: (lb: any) => { if (lb?.delete) lb.delete(); },
+        set_xy: (lb: any, x: any, y: any) => { if (lb) { lb.x = x; lb.y = y; } },
+        set_text: (lb: any, t: any) => { if (lb) lb.text = t; },
+        set_x: (lb: any, x: any) => { if (lb) lb.x = x; },
+        style_label_up: "up",
+        style_label_down: "down",
+        style_label_left: "left",
+        style_label_right: "right",
+      }
+    );
+
+    // Pine Primitive Casts
+    const float = (x: any) => (x !== null && x !== undefined && !isNaN(Number(x)) ? Number(x) : 0);
+    const int = (x: any) => (x !== null && x !== undefined && !isNaN(Number(x)) ? Math.floor(Number(x)) : 0);
+    const bool = (x: any) => Boolean(x);
+    const string = (x: any) => String(x ?? "");
 
     // Pine request, syminfo, timeframe, barstate
     const request = {
@@ -1063,6 +1073,10 @@ export function executeCustomScript(
       nz,
       na,
       fixnan,
+      float,
+      int,
+      bool,
+      string,
       fill,
       barcolor,
       bgcolor,
