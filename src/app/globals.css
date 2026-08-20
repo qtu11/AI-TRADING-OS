@@ -1,0 +1,168 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root,
+  .dark {
+    --bg-main: #06090E;
+    --bg-surface: #0C1117;
+    --bg-surface-hover: #141B24;
+    --bg-surface-subtle: #080D13;
+    --bg-surface-card: #0F1620;
+    --bg-glass: rgba(12, 17, 23, 0.85);
+    --border-main: #18222F;
+    --border-light: #263548;
+    --border-subtle: #101721;
+    --text-primary: #F8FAFC;
+    --text-secondary: #94A3B8;
+    --text-muted: #64748B;
+    --gain-subtle: rgba(16, 185, 129, 0.15);
+    --gain-border: rgba(16, 185, 129, 0.35);
+    --loss-subtle: rgba(244, 63, 94, 0.15);
+    --loss-border: rgba(244, 63, 94, 0.35);
+    --warning-subtle: rgba(245, 158, 11, 0.15);
+    --warning-border: rgba(245, 158, 11, 0.35);
+    --ai-subtle: rgba(56, 189, 248, 0.15);
+    --ai-border: rgba(56, 189, 248, 0.35);
+  }
+
+  .light {
+    --bg-main: #F1F5F9;
+    --bg-surface: #FFFFFF;
+    --bg-surface-hover: #E2E8F0;
+    --bg-surface-subtle: #F8FAFC;
+    --bg-surface-card: #FFFFFF;
+    --bg-glass: rgba(255, 255, 255, 0.95);
+    --border-main: #CBD5E1;
+    --border-light: #94A3B8;
+    --border-subtle: #E2E8F0;
+    --text-primary: #0F172A;
+    --text-secondary: #334155;
+    --text-muted: #64748B;
+    --gain-subtle: rgba(16, 185, 129, 0.12);
+    --gain-border: rgba(16, 185, 129, 0.3);
+    --loss-subtle: rgba(244, 63, 94, 0.12);
+    --loss-border: rgba(244, 63, 94, 0.3);
+    --warning-subtle: rgba(245, 158, 11, 0.12);
+    --warning-border: rgba(245, 158, 11, 0.3);
+    --ai-subtle: rgba(56, 189, 248, 0.12);
+    --ai-border: rgba(56, 189, 248, 0.3);
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    font-family: var(--font-sans), 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.05) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, rgba(99, 102, 241, 0.05) 0px, transparent 50%),
+      radial-gradient(at 50% 100%, rgba(16, 185, 129, 0.04) 0px, transparent 50%);
+    background-attachment: fixed;
+    transition: background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* Custom Sleek Scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-main);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-light);
+  }
+}
+
+@layer utilities {
+  .font-mono {
+    font-family: var(--font-mono), 'JetBrains Mono', monospace;
+  }
+
+  .premium-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-main);
+    border-radius: 1rem;
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.15);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+  }
+
+  .premium-card:hover {
+    border-color: var(--border-light);
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.25);
+  }
+
+  .glass-card {
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border-main);
+    border-radius: 1rem;
+  }
+
+  .glow-border-ai {
+    border-color: rgba(56, 189, 248, 0.4);
+    box-shadow: 0 0 30px -5px rgba(56, 189, 248, 0.25);
+  }
+
+  .glow-border-gain {
+    border-color: rgba(16, 185, 129, 0.4);
+    box-shadow: 0 0 30px -5px rgba(16, 185, 129, 0.25);
+  }
+
+  .glow-border-loss {
+    border-color: rgba(244, 63, 94, 0.4);
+    box-shadow: 0 0 30px -5px rgba(244, 63, 94, 0.25);
+  }
+
+  .gradient-text-brand {
+    background: linear-gradient(135deg, #38BDF8 0%, #818CF8 50%, #C084FC 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .gradient-text-gold {
+    background: linear-gradient(135deg, #FCD34D 0%, #F59E0B 50%, #D97706 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .bento-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-main);
+    border-radius: 1rem;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .bento-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+  }
+
+  .bento-card:hover {
+    border-color: var(--border-light);
+    transform: translateY(-2px);
+    box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.2);
+  }
+}
