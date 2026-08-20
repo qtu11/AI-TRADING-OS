@@ -1214,166 +1214,21 @@ export function executeCustomScript(
 }
 
 // ---------------------------------------------------------------------------
-// BUILT-IN PINE SCRIPT TEMPLATES (Pure Authentic Pine Script v5 / v6)
+// DEFAULT STARTER TEMPLATE
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_SCRIPT_TEMPLATES = [
-  {
-    id: "sniper-smc",
-    name: "Sniper Entry/Exit with SL&TP (SMC Pro)",
-    nameVi: "Chiến Lược Sniper Vào Lệnh & Cắt Lỗ SMC (Pine v6)",
-    description: "Bộ chỉ báo xu hướng EMA 9/21 Ribbon, VWAP, ATR Dynamic TP/SL, đo lực Bull/Bear và nhãn BUY/SELL chuẩn Pine Script.",
-    code: `//@version=6
-indicator("Sniper Entry/Exit with SL&TP", overlay=true, max_labels_count=500, max_boxes_count=500, max_bars_back=1000)
+export const DEFAULT_BLANK_SCRIPT = `//@version=6
+indicator("My Custom Indicator", overlay=true)
 
-// --- COLORS ---
-color c_turquoise = #40E0D0
+// 1. Calculations
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
 
-// --- INPUTS ---
-groupVis         = "Visuals & UI"
-dashTextSize     = input.string("small", "Dashboard Font Size", options=["tiny", "small", "normal", "large", "huge"], group=groupVis)
-tradeTextSize    = input.string("small", "Trade Label Size", options=["tiny", "small", "normal", "large", "huge"], group=groupVis)
-ribbonOpacity    = input.int(75, "EMA Ribbon Opacity", minval=0, maxval=100, group=groupVis)
-labelOffset      = input.int(12, "Label Right Offset (Bars)", minval=1, group=groupVis)
+// 2. Plots
+plot(ema9, "EMA 9", { color: "#10B981", lineWidth: 2 })
+plot(ema21, "EMA 21", { color: "#EF4444", lineWidth: 2 })
 
-groupRisk        = "Risk Management"
-atrMultiplier    = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group=groupRisk)
-
-// --- GLOBAL FUNCTIONS ---
-f_addDashRow(_table, _row, _title, _val, _col, _size) =>
-    table.cell(_table, 0, _row, _title, text_color=color.black, text_halign=text.align_left, text_size=_size)
-    table.cell(_table, 1, _row, _val, text_color=_col, text_size=_size, text_halign=text.align_right)
-
-// --- GLOBAL INDICATORS ---
-ema9    = ta.ema(close, 9)
-ema21   = ta.ema(close, 21)
-vwapV   = ta.vwap(hlc3)
-atr     = ta.atr(14)
-rsiVal  = ta.rsi(close, 14)
-rsi5m   = request.security(syminfo.tickerid, "5", ta.rsi(close, 14))
-[m, s, _] = ta.macd(close, 12, 26, 9)
-[_, _, adx] = ta.dmi(14, 14)
-volAvg  = ta.sma(volume, 20)
-
-// --- DUAL SCORE LOGIC ---
-float bScore = 0
-bScore += (close > vwapV ? 1 : 0), bScore += (rsiVal > 50 ? 1 : 0), bScore += (m > s ? 1 : 0)
-bScore += (ema9 > ema21 ? 1 : 0), bScore += (adx > 25 and close > ema9 ? 1 : 0)
-bScore += (volume > volAvg and close > open ? 1 : 0), bScore += (rsi5m > 50 ? 1 : 0)
-float bullPct = (bScore / 7) * 100
-
-float rScore = 0
-rScore += (close < vwapV ? 1 : 0), rScore += (rsiVal < 50 ? 1 : 0), rScore += (m < s ? 1 : 0)
-rScore += (ema9 < ema21 ? 1 : 0), rScore += (adx > 25 and close < ema9 ? 1 : 0)
-rScore += (volume > volAvg and close < open ? 1 : 0), rScore += (rsi5m < 50 ? 1 : 0)
-float bearPct = (rScore / 7) * 100
-
-// --- BIAS LOGIC ---
-string biasText = (bullPct - bearPct) >= 40 ? "STRONG BULL" : (bearPct - bullPct) >= 40 ? "STRONG BEAR" : bullPct > bearPct ? "MILD BULL" : "MILD BEAR"
-color biasCol = biasText == "STRONG BULL" ? color.green : biasText == "STRONG BEAR" ? color.red : color.gray
-
-// --- DASHBOARD ---
-var table d = table.new(position.middle_left, 2, 17, bgcolor=color.new(#FFF9C4, 10), border_width=1, border_color=color.new(color.gray, 60))
-table.cell(d, 0, 0, "BULL SCORE", text_color=color.white, bgcolor=color.green, text_size=dashTextSize)
-table.cell(d, 1, 0, str.tostring(bullPct, "#") + "%", text_color=color.white, bgcolor=color.green, text_size=dashTextSize)
-table.cell(d, 0, 1, "BEAR SCORE", text_color=color.white, bgcolor=color.red, text_size=dashTextSize)
-table.cell(d, 1, 1, str.tostring(bearPct, "#") + "%", text_color=color.white, bgcolor=color.red, text_size=dashTextSize)
-table.cell(d, 0, 2, "MARKET BIAS", text_color=color.white, bgcolor=color.black, text_size=dashTextSize)
-table.cell(d, 1, 2, biasText, text_color=color.white, bgcolor=biasCol, text_size=dashTextSize)
-f_addDashRow(d, 3,  "Price/VWAP",  close > vwapV ? "ABOVE" : "BELOW", close > vwapV ? color.green : color.red, dashTextSize)
-f_addDashRow(d, 4,  "RSI (14)",    str.tostring(rsiVal, "#.#"), rsiVal > 50 ? color.green : color.red, dashTextSize)
-f_addDashRow(d, 5,  "MACD Trend",  m > s ? "BULL" : "BEAR", m > s ? color.green : color.red, dashTextSize)
-f_addDashRow(d, 6,  "ADX Power",   str.tostring(adx, "#.#"), adx > 25 ? color.green : color.gray, dashTextSize)
-f_addDashRow(d, 7,  "EMA Cross",   ema9 > ema21 ? "BULL" : "BEAR", ema9 > ema21 ? color.green : color.red, dashTextSize)
-f_addDashRow(d, 8,  "ATR 14",      str.tostring(atr, "#.##"), color.black, dashTextSize)
-f_addDashRow(d, 9,  "Vol Status",  volume > volAvg ? "HIGH" : "LOW", volume > volAvg ? color.green : color.gray, dashTextSize)
-f_addDashRow(d, 10, "5m RSI",      str.tostring(rsi5m, "#.#"), rsi5m > 50 ? color.green : color.red, dashTextSize)
-
-// --- PLOTS ---
-plot(ema9, "EMA 9 (Fast)", { color: "#10B981", lineWidth: 2 })
-plot(ema21, "EMA 21 (Slow)", { color: "#EF4444", lineWidth: 2 })
-plot(vwapV, "VWAP", { color: "#F59E0B", lineWidth: 2 })
-
-buyCond  = ta.crossover(ema9, ema21)
-sellCond = ta.crossunder(ema9, ema21)
-plotshape(buyCond, { title: "BUY Signal", text: "BUY", style: "arrowUp", location: "belowBar", color: "#10B981" })
-plotshape(sellCond, { title: "SELL Signal", text: "SELL", style: "arrowDown", location: "aboveBar", color: "#EF4444" })
-`,
-  },
-  {
-    id: "dmsl-pro",
-    name: "Dynamic Market Structure & Liquidity Engine PRO [DMSL]",
-    nameVi: "Động Cơ Cấu Trúc Thị Trường & Thanh Khoản PRO (DMSL)",
-    description: "Tự động phát hiện vùng Hỗ trợ/Kháng cự xác suất cao, điểm cân bằng 50% Equilibrium, Swing Dots và bảng HUD.",
-    code: `//@version=6
-indicator("Dynamic Market Structure & Liquidity Engine PRO [DMSL]", "DMSL Pro Ultra", overlay = true, max_boxes_count = 100, max_lines_count = 100, max_labels_count = 100, max_bars_back = 500)
-
-g_str = "===== HIGH-PROBABILITY ZONE FILTER ====="
-pivotLen     = input.int(10, "Structure Lookback (Pivot Length)", minval = 5, group = g_str)
-minPowerFilter=input.float(4.0, "Min Zone Power Score (Filters Weak Zones)", minval = 1.0, maxval = 9.0, step = 0.5, group = g_str)
-maxZones     = input.int(2, "Max Active Zones Per Side (Clean Chart)", minval = 1, maxval = 5, group = g_str)
-atrLen       = input.int(14, "ATR Sensitivity Length", minval = 1, group = g_str)
-zoneScale    = input.float(0.20, "Zone Height Multiplier (x ATR)", minval = 0.05, maxval = 0.5, step = 0.05, group = g_str)
-
-g_swing = "===== MAJOR SWING DOTS (HH / HL / LH / LL) ====="
-showSwingDots= input.bool(true, "Show Major Swing Dots", group = g_swing)
-c_hh_dot     = input.color(#ff1744, "High Swing Dot Color (Red)", group = g_swing)
-c_hl_dot     = input.color(#00e676, "Low Swing Dot Color (Green)", group = g_swing)
-
-g_smc = "===== MARKET STRUCTURE (BOS & CHOCH) ====="
-showSMC      = input.bool(true, "Show Clean BOS / CHoCH", group = g_smc)
-c_bull_smc   = input.color(#00ffa8, "Bullish Structure Color", group = g_smc)
-c_bear_smc   = input.color(#ff1744, "Bearish Structure Color", group = g_smc)
-
-curAtr = ta.atr(atrLen)
-pHi    = ta.pivothigh(high, pivotLen, pivotLen)
-pLo    = ta.pivotlow(low, pivotLen, pivotLen)
-
-// Major range 50% EQ
-float majorHigh = ta.highest(high, 100)
-float majorLow  = ta.lowest(low, 100)
-float eqLevel   = (majorHigh + majorLow) / 2.0
-
-plot(eqLevel, "Major 50% EQ Line", { color: "#00e5ff", lineWidth: 2 })
-
-plotshape(showSwingDots and not na(pHi) ? pHi : na, title="High Swing Dot", style=shape.circle, location=location.absolute, color=c_hh_dot, size=size.small)
-plotshape(showSwingDots and not na(pLo) ? pLo : na, title="Low Swing Dot", style=shape.circle, location=location.absolute, color=c_hl_dot, size=size.small)
-
-var table hud = table.new(position = position.top_right, columns = 2, rows = 3, bgcolor = color.new(#151823, 10), border_color = color.new(color.gray, 60), border_width = 1)
-table.cell(hud, 0, 0, "DMSL PRO", text_color = color.white, text_size = size.small)
-table.cell(hud, 1, 0, "ULTRA", text_color = #00e676, text_size = size.small)
-table.cell(hud, 0, 1, "Active Resistance", text_color = color.gray, text_size = size.small)
-table.cell(hud, 1, 1, "2 Zones", text_color = #ff5252, text_size = size.small)
-table.cell(hud, 0, 2, "Active Support", text_color = color.gray, text_size = size.small)
-table.cell(hud, 1, 2, "2 Zones", text_color = #00e676, text_size = size.small)
-`,
-  },
-  {
-    id: "supertrend-macd",
-    name: "SuperTrend + MACD Momentum Engine",
-    nameVi: "Động Cơ Đột Phá SuperTrend & MACD (Pine v6)",
-    description: "Xác định xu hướng bằng SuperTrend kết hợp động lượng phân kỳ MACD.",
-    code: `//@version=6
-indicator("SuperTrend + MACD Engine", overlay=true)
-
-let st = ta.supertrend(3, 10)
-let [m, s, hist] = ta.macd(close, 12, 26, 9)
-let ema200 = ta.ema(close, 200)
-
-plot(st.supertrend, "SuperTrend Line", { color: "#10B981", lineWidth: 2 })
-plot(ema200, "EMA 200 Base Trend", { color: "#F59E0B", lineWidth: 2 })
-
-let stBuy = ta.crossover(close, st.supertrend)
-let stSell = ta.crossunder(close, st.supertrend)
-
-plotshape(stBuy, { title: "SuperTrend BUY", text: "BUY ⚡", style: "arrowUp", location: "belowBar", color: "#10B981" })
-plotshape(stSell, { title: "SuperTrend SELL", text: "SELL ⚡", style: "arrowDown", location: "aboveBar", color: "#EF4444" })
-
-_dashTable = table.new("top_right", 2, 4)
-table.cell(_dashTable, 0, 0, "TREND STATUS", color.black)
-table.cell(_dashTable, 1, 0, close > st.supertrend ? "BULLISH TREND" : "BEARISH TREND", color.green)
-table.cell(_dashTable, 0, 1, "MACD HISTOGRAM", color.black)
-table.cell(_dashTable, 1, 1, hist.valueOf() > 0 ? "BULLISH MOMENTUM" : "BEARISH MOMENTUM", color.green)
-`,
-  },
-];
+// 3. Signals
+buySignal = ta.crossover(ema9, ema21)
+plotshape(buySignal, { title: "BUY Signal", text: "BUY", style: "arrowUp", location: "belowBar", color: "#10B981" })
+`;

@@ -9,7 +9,6 @@ import { CustomScriptModal } from "./CustomScriptModal";
 import {
   executeCustomScript,
   ScriptExecutionResult,
-  DEFAULT_SCRIPT_TEMPLATES,
 } from "@/lib/indicators/script-engine";
 import {
   createChart,
