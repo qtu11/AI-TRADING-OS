@@ -382,6 +382,21 @@ const PINE_NAMED_ARGS = [
   "offset",
 ];
 
+export function cleanParamNames(argsStr: string): string {
+  if (!argsStr || !argsStr.trim()) return "";
+  return argsStr
+    .split(",")
+    .map((param) => {
+      let p = param.trim();
+      if (!p) return "";
+      p = p.replace(/\b(?:series|simple|const|input|float|int|bool|string|color|line|label|box|table|matrix|array|chart)\s+/gi, "");
+      p = p.replace(/\b(?:series|simple|const|input)\s+/gi, "");
+      p = p.replace(/\[\s*\]/g, "");
+      return p.trim();
+    })
+    .join(", ");
+}
+
 export function transpilePineScriptToJS(pineCode: string): string {
   let code = pineCode.replace(/\r\n/g, "\n");
 
@@ -394,21 +409,21 @@ export function transpilePineScriptToJS(pineCode: string): string {
   // 2. Transpile UNQUOTED raw Hex color literals (e.g. #40E0D0 -> "#40E0D0"), don't touch already-quoted "#40E0D0"
   code = code.replace(/(?<!["'])#([0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[0-9a-fA-F]{3})\b(?!["'])/g, '"#$1"');
 
-  // 3. Strip Pine Named Argument Labels: `text_color=val` -> `val`
-  const namedArgRegex = new RegExp(`\\b(${PINE_NAMED_ARGS.join("|")})\\s*=\\s*`, "gi");
-  code = code.replace(namedArgRegex, "");
-
-  // 4. Strip generic type brackets in array constructor: `array.new < Type >(...)` -> `array.new(...)`
+  // 3. Strip generic type brackets in array constructor: `array.new < Type >(...)` -> `array.new(...)`
   code = code.replace(/array\.new\s*<[^>]+>\s*\(/g, "array.new(");
 
-  // 5. Custom type definitions: `type Zone \n box b ...` -> factory object
+  // 4. Custom type definitions: `type Zone \n box b ...` -> factory object
   code = code.replace(/^type\s+([a-zA-Z0-9_]+)\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = { new: (...args) => ({}) };\n");
 
-  // 6. Method declarations: `method in_out(...) => ...` -> `var in_out = ...`
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = ($2) => {};\n");
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm, "\nvar $1 = ($2) => { return $3; };\n");
+  // 5. Method declarations: `method in_out(...) => ...` -> `var in_out = ...`
+  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, (m, name, args, body) => {
+    return `\nvar ${name} = (${cleanParamNames(args)}) => {};\n`;
+  });
+  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm, (m, name, args, body) => {
+    return `\nvar ${name} = (${cleanParamNames(args)}) => { return ${body}; };\n`;
+  });
 
-  // 7. Multi-line function declarations: `f_name(args) =>`
+  // 6. Multi-line function declarations: `f_name(args) =>`
   code = code.replace(
     /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm,
     (match: string, funcName: string, args: string, body: string) => {
@@ -416,20 +431,24 @@ export function transpilePineScriptToJS(pineCode: string): string {
         .split("\n")
         .map((line: string) => line.trim())
         .filter((line: string) => line.length > 0)
-        .map((line: string) => (line.endsWith(";") ? line : line + ";"))
+        .map((line: string) => (line.endsWith(";") || line.endsWith("}") || line.endsWith("{") ? line : line + ";"))
         .join("\n");
-      return `\nvar ${funcName} = (${args}) => {\n${cleanBody}\n};\n`;
+      return `\nvar ${funcName} = (${cleanParamNames(args)}) => {\n${cleanBody}\n};\n`;
     }
   );
 
   // Single-line arrow functions
   code = code.replace(
     /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm,
-    "\nvar $1 = ($2) => { return $3; };"
+    (m, funcName, args, body) => {
+      return `\nvar ${funcName} = (${cleanParamNames(args)}) => { return ${body}; };`;
+    }
   );
 
+  // 7. Strip Named Argument Labels inside function calls: `plot(close, title = "X", offset = 5)` -> `plot(close, "X", 5)`
+  code = code.replace(/(?<=[(,]\\s*)(?:[a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(?!=)/g, "");
+
   // 8. Handle Tuple Destructuring assignments: `[m, s, _] = ...` and `[_, _, adx] = ...`
-  // Use [^\S\r\n]* (horizontal whitespace only) so we NEVER consume newlines!
   let dummyCounter = 0;
   code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|let|const)?[^\S\r\n]*\[\s*([a-zA-Z0-9_, ]+)\s*\]\s*=/g, (match, inner) => {
     const parts = inner.split(",").map((p: string) => {
@@ -443,14 +462,14 @@ export function transpilePineScriptToJS(pineCode: string): string {
     return `\nvar [${parts.join(", ")}] =`;
   });
 
-  // 9. Comma-separated variable declarations: `var float a = 0, var float b = 0`
-  code = code.replace(/,\s*(?:var|varip|let)?\s*(?:float|int|bool|string|color|series|simple|table|line|label|box|chart|[a-zA-Z0-9_]+)?\s*([a-zA-Z_0-9]+)\s*=/g, "; var $1 =");
+  // 9. Comma-separated variable declarations: `var float a = 0, var float b = 0` (ONLY when `var` or `varip` is explicitly on subsequent terms)
+  code = code.replace(/,\s*(?:var|varip)\s+(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)?\s*([a-zA-Z_0-9]+)\s*=/g, "; var $1 =");
 
   // 10. Generic array definitions with user types: `var liq [] b_liq_B = ...` or `var FVG [] bFVG_UP = ...`
   code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*[a-zA-Z0-9_]+[^\S\r\n]*\[[^\S\r\n]*\][^\S\r\n]*([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $1 =");
 
   // 11. Type-annotated variable declarations: `var mss MSS = ...` or `var float x = ...` or `float x = ...`
-  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*([a-zA-Z0-9_]+)[^\S\r\n]+([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $2 =");
+  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*(?!(?:for|if|while|else|return|switch|case|var|let|const)\b)([a-zA-Z0-9_]+)[^\S\r\n]+([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $2 =");
 
   // 12. Single variable typed without initialization: `float x` or `var line l`
   code = code.replace(/\b(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)\s+([a-zA-Z_0-9]+)\b/g, "var $1");
@@ -653,18 +672,39 @@ export function executeCustomScript(
       new_int: (size: number = 0, val: number = 0) => new Array(size).fill(val),
       new_bool: (size: number = 0, val: boolean = false) => new Array(size).fill(val),
       new_string: (size: number = 0, val: string = "") => new Array(size).fill(val),
+      new_color: (size: number = 0, val: string = "#FFFFFF") => new Array(size).fill(val),
       new_line: () => [],
       new_box: () => [],
       new_label: () => [],
+      new_table: () => [],
+      from: (...items: any[]) => [...items],
+      copy: (arr: any[]) => (Array.isArray(arr) ? [...arr] : []),
+      slice: (arr: any[], start: number, end?: number) => (Array.isArray(arr) ? arr.slice(start, end) : []),
+      concat: (arr1: any[], arr2: any[]) => (Array.isArray(arr1) && Array.isArray(arr2) ? arr1.concat(arr2) : []),
+      includes: (arr: any[], val: any) => (Array.isArray(arr) ? arr.includes(val) : false),
+      indexof: (arr: any[], val: any) => (Array.isArray(arr) ? arr.indexOf(val) : -1),
+      lastindexof: (arr: any[], val: any) => (Array.isArray(arr) ? arr.lastIndexOf(val) : -1),
+      join: (arr: any[], sep: string = ",") => (Array.isArray(arr) ? arr.join(sep) : ""),
+      reverse: (arr: any[]) => { if (Array.isArray(arr)) arr.reverse(); return arr; },
+      sort: (arr: any[]) => { if (Array.isArray(arr)) arr.sort((a, b) => a - b); return arr; },
+      min: (arr: any[]) => (Array.isArray(arr) && arr.length > 0 ? Math.min(...arr.filter((x) => !isNaN(x))) : 0),
+      max: (arr: any[]) => (Array.isArray(arr) && arr.length > 0 ? Math.max(...arr.filter((x) => !isNaN(x))) : 0),
+      sum: (arr: any[]) => (Array.isArray(arr) ? arr.reduce((acc, v) => acc + (isNaN(v) ? 0 : Number(v)), 0) : 0),
+      avg: (arr: any[]) => {
+        if (!Array.isArray(arr) || arr.length === 0) return 0;
+        const valid = arr.filter((x) => !isNaN(x));
+        return valid.length > 0 ? valid.reduce((a, b) => a + Number(b), 0) / valid.length : 0;
+      },
       push: (arr: any[], val: any) => { if (Array.isArray(arr)) arr.push(val); },
-      pop: (arr: any[]) => Array.isArray(arr) ? arr.pop() : undefined,
-      shift: (arr: any[]) => Array.isArray(arr) ? arr.shift() : undefined,
+      pop: (arr: any[]) => (Array.isArray(arr) ? arr.pop() : undefined),
+      shift: (arr: any[]) => (Array.isArray(arr) ? arr.shift() : undefined),
       unshift: (arr: any[], val: any) => { if (Array.isArray(arr)) arr.unshift(val); },
-      size: (arr: any[]) => Array.isArray(arr) ? arr.length : 0,
-      get: (arr: any[], idx: number) => Array.isArray(arr) ? arr[idx] : undefined,
+      size: (arr: any[]) => (Array.isArray(arr) ? arr.length : 0),
+      get: (arr: any[], idx: number) => (Array.isArray(arr) ? arr[idx] : undefined),
       set: (arr: any[], idx: number, val: any) => { if (Array.isArray(arr)) arr[idx] = val; },
-      remove: (arr: any[], idx: number) => Array.isArray(arr) ? arr.splice(idx, 1)[0] : undefined,
+      remove: (arr: any[], idx: number) => (Array.isArray(arr) ? arr.splice(idx, 1)[0] : undefined),
       clear: (arr: any[]) => { if (Array.isArray(arr)) arr.length = 0; },
+      fill: (arr: any[], val: any) => { if (Array.isArray(arr)) arr.fill(val); },
     };
 
     // Pine color module
@@ -684,6 +724,10 @@ export function executeCustomScript(
       rgb: (r: number, g: number, b: number, a: number = 100) =>
         `rgba(${r}, ${g}, ${b}, ${Math.round((a / 100) * 100) / 100})`,
       new: (c: string, trans: number = 0) => c,
+      from_gradient: (val: number, minVal: number, maxVal: number, col1: string, col2: string) => {
+        const factor = maxVal === minVal ? 0.5 : Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
+        return factor > 0.5 ? col2 : col1;
+      },
       r: (c: string) => 0,
       g: (c: string) => 0,
       b: (c: string) => 0,
