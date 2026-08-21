@@ -1,0 +1,57 @@
+//@version=5
+indicator("PARA Binary Options (Fixed)", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// Inputs
+length      = input.int(40, "Length")
+multMid     = input.float(1.2, "Inner Channel")
+multOuter   = input.float(2.3, "Outer Channel")
+signalGap   = input.int(1, "Signal Delay (Bars)")
+maxLabels   = input.int(60, "Max Labels to Keep", minval=5)
+
+// Calculations
+basis = ta.ema(close, length)
+dev   = ta.stdev(close, length)
+
+upper1 = basis + dev * multMid
+lower1 = basis - dev * multMid
+
+upper2 = basis + dev * multOuter
+lower2 = basis - dev * multOuter
+
+// Plots (use variables for fill)
+p_basis = plot(basis, "Basis", color=color.aqua, linewidth=2)
+p_u1 = plot(upper1, "Upper1", color=color.blue, linewidth=2)
+p_l1 = plot(lower1, "Lower1", color=color.blue, linewidth=2)
+p_u2 = plot(upper2, "Upper2", color=color.new(color.red, 10), linewidth=2)
+p_l2 = plot(lower2, "Lower2", color=color.new(color.red, 10), linewidth=2)
+
+fill(p_u2, p_l2, color=color.new(color.red, 85))
+
+// Signal logic (confirmation candle)
+buy  = low <= lower2 and close > open           // touched lower outer and closed bullish
+sell = high >= upper2 and close < open          // touched upper outer and closed bearish
+
+buySignal  = buy and close > close[signalGap]
+sellSignal = sell and close < close[signalGap]
+
+// Manage labels safely (to avoid too many labels error)
+var label[] lbls = array.new<label>()
+f_add_label(_lab) =>
+    array.push(lbls, _lab)
+    // remove old labels if exceed
+    if array.size(lbls) > maxLabels
+        old = array.shift(lbls)
+        label.delete(old)
+
+// Create labels
+if buySignal
+    lab = label.new(bar_index, low, "▲ BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal, yloc=yloc.price)
+    f_add_label(lab)
+
+if sellSignal
+    lab = label.new(bar_index, high, "▼ SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal, yloc=yloc.price)
+    f_add_label(lab)
+
+// Optional: Alerts conditions (user can create alert based on these)
+alertcondition(buySignal,  title="PARA BUY",  message="PARA BUY signal")
+alertcondition(sellSignal, title="PARA SELL", message="PARA SELL signal")

@@ -21,6 +21,8 @@ import {
   FileCode,
   Tag,
   HelpCircle,
+  Upload,
+  FileText,
 } from "lucide-react";
 
 export interface CustomScriptModalProps {
@@ -60,6 +62,7 @@ export const CustomScriptModal: React.FC<CustomScriptModalProps> = ({
   const [executionResult, setExecutionResult] = useState<ScriptExecutionResult | null>(null);
   const [isCompiling, setIsCompiling] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"editor" | "cheatsheet" | "logs">("editor");
+  const [logs, setLogs] = useState<string[]>([]);
 
   // Sync scriptCode and name when modal opens
   useEffect(() => {
@@ -98,11 +101,13 @@ export const CustomScriptModal: React.FC<CustomScriptModalProps> = ({
     }
 
     setIsCompiling(true);
+    setLogs([]);
     soundFX.playClick();
 
     setTimeout(() => {
       const result = executeCustomScript(scriptCode, candles);
       setExecutionResult(result);
+      setLogs(result.logs);
       setIsCompiling(false);
 
       if (result.success) {
@@ -131,6 +136,39 @@ export const CustomScriptModal: React.FC<CustomScriptModalProps> = ({
       localStorage.removeItem("ai_trading_os_custom_indicator_name");
     } catch (e) {}
     onClose();
+  };
+
+  // Handle file upload (.pine, .txt, .js files)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setScriptCode(content);
+        soundFX.playClick();
+        
+        // Auto-detect indicator name from file or content
+        const detectedName = file.name.replace(/\.(pine|txt|js)$/i, "");
+        const contentName = extractIndicatorTitle(content, "");
+        setIndicatorName(contentName || detectedName);
+        
+        // Show success feedback in logs
+        const fileLog = `[INFO] Đã nạp file: ${file.name} (${(content.length / 1024).toFixed(1)}KB)`;
+        setLogs([fileLog]);
+        setActiveTab("logs");
+      }
+    };
+    reader.onerror = () => {
+      soundFX.playWarning();
+      setLogs(["[ERROR] Không thể đọc file. Vui lòng thử lại."]);
+    };
+    reader.readAsText(file);
+    
+    // Reset input
+    e.target.value = "";
   };
 
   return (
@@ -195,6 +233,18 @@ export const CustomScriptModal: React.FC<CustomScriptModalProps> = ({
               <Eraser className="w-3.5 h-3.5" />
               <span>{isVi ? "Xóa Trắng" : "Clear Editor"}</span>
             </button>
+
+            {/* Upload File Button */}
+            <label className="px-3 py-2 rounded-xl border border-brand-500/40 bg-brand-500/10 text-brand-400 hover:bg-brand-500/20 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap">
+              <Upload className="w-3.5 h-3.5" />
+              <span>{isVi ? "Nạp File .pine" : "Upload .pine"}</span>
+              <input
+                type="file"
+                accept=".pine,.txt,.js"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </label>
           </div>
 
           {/* Tab Switcher */}
@@ -358,15 +408,17 @@ export const CustomScriptModal: React.FC<CustomScriptModalProps> = ({
 
           {activeTab === "logs" && (
             <div className="p-4 rounded-2xl bg-[#0A0E14] border border-border text-[11px] font-mono text-[#E6EDF3] space-y-1.5 min-h-[220px]">
-              {executionResult && executionResult.logs.length > 0 ? (
-                executionResult.logs.map((log, idx) => (
+              {logs.length > 0 ? (
+                logs.map((log, idx) => (
                   <div
                     key={idx}
                     className={
-                      log.includes("[ERROR]")
+                      log.includes("[ERROR]") || log.includes("SYNTAX")
                         ? "text-loss font-bold"
-                        : log.includes("[WARN]")
+                        : log.includes("[WARN]") || log.includes("[INFO]")
                         ? "text-amber-400"
+                        : log.includes("Compiled successfully")
+                        ? "text-gain"
                         : "text-txt-secondary"
                     }
                   >

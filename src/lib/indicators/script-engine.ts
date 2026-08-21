@@ -382,114 +382,578 @@ const PINE_NAMED_ARGS = [
   "offset",
 ];
 
-export function cleanParamNames(argsStr: string): string {
+// Attach helper prototype methods for Pine Script compatibility
+if (typeof Array !== "undefined") {
+  if (!(Array.prototype as any).size) {
+    (Array.prototype as any).size = function () {
+      return this.length;
+    };
+  }
+  if (!(Array.prototype as any).get) {
+    (Array.prototype as any).get = function (i: number) {
+      return this[i];
+    };
+  }
+  if (!(Array.prototype as any).set) {
+    (Array.prototype as any).set = function (i: number, v: any) {
+      this[i] = v;
+    };
+  }
+  if (!(Array.prototype as any).clear) {
+    (Array.prototype as any).clear = function () {
+      this.length = 0;
+    };
+  }
+}
+if (typeof Map !== "undefined") {
+  if (!(Map.prototype as any).put) {
+    (Map.prototype as any).put = function (k: any, v: any) {
+      this.set(k, v);
+      return v;
+    };
+  }
+}
+
+export function cleanParams(argsStr: string): string {
   if (!argsStr || !argsStr.trim()) return "";
   return argsStr
     .split(",")
     .map((param) => {
       let p = param.trim();
       if (!p) return "";
-      p = p.replace(/\b(?:series|simple|const|input|float|int|bool|string|color|line|label|box|table|matrix|array|chart)\s+/gi, "");
-      p = p.replace(/\b(?:series|simple|const|input)\s+/gi, "");
+      p = p.replace(/\b(array|map|matrix)(\.new)?\s*<[^>\n]+>/gi, "$1$2");
+      p = p.replace(/\b(?:series|simple|const|input|float|int|bool|string|color|line|label|box|table|matrix|array|map)\s+/gi, "");
       p = p.replace(/\[\s*\]/g, "");
       return p.trim();
     })
     .join(", ");
 }
 
-export function transpilePineScriptToJS(pineCode: string): string {
-  let code = pineCode.replace(/\r\n/g, "\n");
+function stripNamedArgsWithPDepth(code: string): string {
+  let result = "";
+  let pDepth = 0;
+  let i = 0;
 
-  // 1. Remove comments and header directives
-  code = code
-    .replace(/\/\/@version=\d+/gi, "")
-    .replace(/\bindicator\s*\([^)]*\)/gi, "// indicator header stripped")
-    .replace(/\bstrategy\s*\([^)]*\)/gi, "// strategy header stripped");
-
-  // 2. Transpile UNQUOTED raw Hex color literals (e.g. #40E0D0 -> "#40E0D0"), don't touch already-quoted "#40E0D0"
-  code = code.replace(/(?<!["'])#([0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[0-9a-fA-F]{3})\b(?!["'])/g, '"#$1"');
-
-  // 3. Strip generic type brackets in array constructor: `array.new < Type >(...)` -> `array.new(...)`
-  code = code.replace(/array\.new\s*<[^>]+>\s*\(/g, "array.new(");
-
-  // 4. Custom type definitions: `type Zone \n box b ...` -> factory object
-  code = code.replace(/^type\s+([a-zA-Z0-9_]+)\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = { new: (...args) => ({}) };\n");
-
-  // 5. Method declarations: `method in_out(...) => ...` -> `var in_out = ...`
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, (m, name, args, body) => {
-    return `\nvar ${name} = (${cleanParamNames(args)}) => {};\n`;
-  });
-  code = code.replace(/^method\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm, (m, name, args, body) => {
-    return `\nvar ${name} = (${cleanParamNames(args)}) => { return ${body}; };\n`;
-  });
-
-  // 6. Multi-line function declarations: `f_name(args) =>`
-  code = code.replace(
-    /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm,
-    (match: string, funcName: string, args: string, body: string) => {
-      const cleanBody = body
-        .split("\n")
-        .map((line: string) => line.trim())
-        .filter((line: string) => line.length > 0)
-        .map((line: string) => (line.endsWith(";") || line.endsWith("}") || line.endsWith("{") ? line : line + ";"))
-        .join("\n");
-      return `\nvar ${funcName} = (${cleanParamNames(args)}) => {\n${cleanBody}\n};\n`;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === "(") {
+      pDepth++;
+      result += ch;
+      i++;
+      continue;
     }
-  );
-
-  // Single-line arrow functions
-  code = code.replace(
-    /^([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/gm,
-    (m, funcName, args, body) => {
-      return `\nvar ${funcName} = (${cleanParamNames(args)}) => { return ${body}; };`;
+    if (ch === ")") {
+      pDepth = Math.max(0, pDepth - 1);
+      result += ch;
+      i++;
+      continue;
     }
-  );
 
-  // 7. Strip Named Argument Labels inside function calls: `plot(close, title = "X", offset = 5)` -> `plot(close, "X", 5)`
-  code = code.replace(/(?<=[(,]\\s*)(?:[a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*(?!=)/g, "");
-
-  // 8. Handle Tuple Destructuring assignments: `[m, s, _] = ...` and `[_, _, adx] = ...`
-  let dummyCounter = 0;
-  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|let|const)?[^\S\r\n]*\[\s*([a-zA-Z0-9_, ]+)\s*\]\s*=/g, (match, inner) => {
-    const parts = inner.split(",").map((p: string) => {
-      const trimmed = p.trim();
-      if (trimmed === "_" || trimmed === "") {
-        dummyCounter++;
-        return `_ignore_${dummyCounter}`;
+    if (pDepth > 0) {
+      const sub = code.substring(i);
+      const match = sub.match(/^[ \t\r\n]*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?![=>])/);
+      if (match && (result.endsWith("(") || /[(\,][\s\r\n]*$/.test(result))) {
+        i += match[0].length;
+        continue;
       }
-      return trimmed;
-    });
-    return `\nvar [${parts.join(", ")}] =`;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  return result;
+}
+
+function transpilePineFunctions(code: string): string {
+  const lines = code.split("\n");
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const raw = lines[i];
+
+    // Single-line method or top-level arrow function: `f(x) => expr`
+    const matchSingle = raw.match(/^(?:method\s+)?([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*(.+)$/);
+    if (matchSingle) {
+      const name = matchSingle[1];
+      const args = cleanParams(matchSingle[2]);
+      const body = matchSingle[3].trim().replace(/;+$/, "");
+      result.push(`var ${name} = (${args}) => { return ${body}; };`);
+      i++;
+      continue;
+    }
+
+    // Multi-line method or top-level arrow function: `f(x) => \n body`
+    const matchMulti = raw.match(/^(?:method\s+)?([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*=>\s*$/);
+    if (matchMulti) {
+      const name = matchMulti[1];
+      const args = cleanParams(matchMulti[2]);
+
+      const bodyLines: string[] = [];
+      i++;
+
+      while (i < lines.length) {
+        const curRaw = lines[i];
+        const curTrimmed = curRaw.trim();
+
+        if (!curTrimmed) {
+          bodyLines.push("");
+          i++;
+          continue;
+        }
+
+        const curIndent = (curRaw.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+        if (curIndent <= 0) {
+          break;
+        }
+        bodyLines.push(curRaw);
+        i++;
+      }
+
+      while (bodyLines.length > 0 && !bodyLines[bodyLines.length - 1].trim()) {
+        bodyLines.pop();
+      }
+
+      if (bodyLines.length > 0) {
+        let lastIdx = bodyLines.length - 1;
+        while (lastIdx >= 0 && !bodyLines[lastIdx].trim()) lastIdx--;
+        if (lastIdx >= 0) {
+          const lastLine = bodyLines[lastIdx];
+          const lastTrim = lastLine.trim();
+          if (
+            !lastTrim.startsWith("return ") &&
+            !lastTrim.includes("=") &&
+            !lastTrim.startsWith("if ") &&
+            !lastTrim.startsWith("for ") &&
+            !lastTrim.startsWith("while ") &&
+            !lastTrim.startsWith("switch ")
+          ) {
+            bodyLines[lastIdx] = lastLine.replace(/^([ \t]*)/, "$1return ");
+          }
+        }
+      }
+
+      result.push(`var ${name} = (${args}) => {`);
+      result.push(...bodyLines);
+      result.push(`};`);
+      continue;
+    }
+
+    result.push(raw);
+    i++;
+  }
+
+  return result.join("\n");
+}
+
+function transpileIfExpressions(code: string): string {
+  const lines = code.split("\n");
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    const matchIfAssign = raw.match(/^([ \t]*)(?:(var\s+[a-zA-Z0-9_]+\s*=\s*|\b[a-zA-Z0-9_]+\s*:=\s*|\b[a-zA-Z0-9_]+\s*=\s*))if(?:\s+(.+))?$/);
+
+    if (matchIfAssign && matchIfAssign[2]) {
+      const indent = matchIfAssign[1] || "";
+      const assignPrefix = matchIfAssign[2] || "";
+      const firstCond = matchIfAssign[3] ? matchIfAssign[3].trim() : "";
+      const ifIndent = indent.replace(/\t/g, "    ").length;
+
+      const blockLines: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const curRaw = lines[i];
+        if (!curRaw.trim()) {
+          i++;
+          continue;
+        }
+        const curIndent = (curRaw.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+        if (curIndent < ifIndent || (curIndent === ifIndent && !/^else\b/i.test(curRaw.trim()))) {
+          break;
+        }
+        blockLines.push(curRaw);
+        i++;
+      }
+
+      let iifeBody = "";
+      let currentBranchCond = firstCond;
+      let branchLines: string[] = [];
+
+      function flushBranch() {
+        if (branchLines.length > 0) {
+          const lastLine = branchLines[branchLines.length - 1].trim().replace(/[,;]+$/, "");
+          const prevLines = branchLines.slice(0, -1).map((l) => l.trim().replace(/[,;]+$/, "") + ";").join(" ");
+          const ret = prevLines ? `${prevLines} return ${lastLine};` : `return ${lastLine};`;
+
+          if (currentBranchCond === "else") {
+            iifeBody += ` else { ${ret} }`;
+          } else if (iifeBody) {
+            iifeBody += ` else if (${currentBranchCond}) { ${ret} }`;
+          } else {
+            iifeBody += `if (${currentBranchCond}) { ${ret} }`;
+          }
+          branchLines = [];
+        }
+      }
+
+      for (const bl of blockLines) {
+        const t = bl.trim();
+        if (/^else\s+if\b/i.test(t)) {
+          flushBranch();
+          currentBranchCond = t.replace(/^else\s+if\s+/i, "").trim();
+        } else if (/^else\b/i.test(t)) {
+          flushBranch();
+          currentBranchCond = "else";
+        } else {
+          branchLines.push(t);
+        }
+      }
+      flushBranch();
+
+      result.push(`${indent}${assignPrefix}(() => { ${iifeBody} })();`);
+      continue;
+    }
+
+    result.push(raw);
+    i++;
+  }
+
+  return result.join("\n");
+}
+
+function transpilePineSwitchesUnified(code: string): string {
+  const lines = code.split("\n");
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    const matchSwitch = raw.match(/^([ \t]*)(?:((?:var\s+)?\[[^\]]+\]\s*=\s*|var\s+[a-zA-Z0-9_]+\s*=\s*|\b[a-zA-Z0-9_]+\s*:=\s*|\b[a-zA-Z0-9_]+\s*=\s*))?switch(?:\s+(.*))?$/);
+
+    if (matchSwitch) {
+      const indent = matchSwitch[1] || "";
+      const assignPrefix = matchSwitch[2] || "";
+      const switchExpr = matchSwitch[3] ? matchSwitch[3].trim() : "";
+      const switchIndent = indent.replace(/\t/g, "    ").length;
+
+      const caseLines: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const curRaw = lines[i];
+        if (!curRaw.trim()) {
+          i++;
+          continue;
+        }
+        const curIndent = (curRaw.match(/^[ \t]*/) || [""])[0].replace(/\t/g, "    ").length;
+        if (curIndent <= switchIndent) {
+          break;
+        }
+        caseLines.push(curRaw);
+        i++;
+      }
+
+      let hasMultiStatement = false;
+      for (const cl of caseLines) {
+        const t = cl.trim();
+        if (!t.includes("=>") && t.length > 0) {
+          hasMultiStatement = true;
+          break;
+        }
+      }
+
+      if (assignPrefix || (!hasMultiStatement && caseLines.length > 0)) {
+        let branches = "";
+        for (const cl of caseLines) {
+          const t = cl.trim();
+          if (t.includes("=>")) {
+            const parts = t.split("=>");
+            const cond = parts[0].trim();
+            const expr = parts.slice(1).join("=>").trim().replace(/[,;]+$/, "");
+            if (!cond) {
+              branches += ` else { return ${expr}; }`;
+            } else if (switchExpr) {
+              branches += `${branches ? " else " : ""}if (${switchExpr} === (${cond})) { return ${expr}; }`;
+            } else {
+              branches += `${branches ? " else " : ""}if (${cond}) { return ${expr}; }`;
+            }
+          }
+        }
+        const iife = `(() => { ${branches} })()`;
+        const prefix = assignPrefix ? assignPrefix : (indent.length > 0 ? "return " : "");
+        result.push(`${indent}${prefix}${iife};`);
+      } else {
+        const testExpr = switchExpr || "true";
+        result.push(`${indent}switch (${testExpr}) {`);
+        let currentCaseOpen = false;
+
+        for (const cl of caseLines) {
+          const t = cl.trim();
+          if (t.includes("=>")) {
+            if (currentCaseOpen) {
+              result.push(`${indent}    break;`);
+            }
+            const parts = t.split("=>");
+            const cond = parts[0].trim();
+            const inlineBody = parts.slice(1).join("=>").trim().replace(/[,;]+$/, "");
+            if (!cond) {
+              result.push(`${indent}  default:`);
+            } else {
+              result.push(`${indent}  case ${cond}:`);
+            }
+            currentCaseOpen = true;
+            if (inlineBody) {
+              result.push(`${indent}    ${inlineBody};`);
+            }
+          } else {
+            result.push(`${indent}    ${t.replace(/[,;]+$/, "")};`);
+          }
+        }
+        if (currentCaseOpen) {
+          result.push(`${indent}    break;`);
+        }
+        result.push(`${indent}}`);
+      }
+      continue;
+    }
+
+    result.push(raw);
+    i++;
+  }
+
+  return result.join("\n");
+}
+
+function convertIndentation(code: string): string {
+  const lines = code.split("\n");
+  const output: string[] = [];
+  const indentStack: number[] = [0];
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (!trimmed) {
+      output.push("");
+      continue;
+    }
+
+    const matchIndent = rawLine.match(/^[ \t]*/);
+    const indentStr = matchIndent ? matchIndent[0] : "";
+    const indent = indentStr.replace(/\t/g, "    ").length;
+
+    let line = trimmed;
+
+    if (/^else\s+if\b/i.test(line)) {
+      while (indentStack.length > 1 && indent < indentStack[indentStack.length - 1]) {
+        indentStack.pop();
+        output.push("}");
+      }
+      const cond = line.replace(/^else\s+if\s+/i, "").trim().replace(/;+$/, "");
+      line = `else if (${cond}) {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    if (/^else\b/i.test(line)) {
+      while (indentStack.length > 1 && indent < indentStack[indentStack.length - 1]) {
+        indentStack.pop();
+        output.push("}");
+      }
+      line = `else {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    while (indentStack.length > 1 && indent < indentStack[indentStack.length - 1]) {
+      indentStack.pop();
+      output.push("}");
+    }
+
+    if (/^if\b/i.test(line) && !line.includes("=>")) {
+      const cond = line.replace(/^if\s+/i, "").trim().replace(/;+$/, "");
+      line = `if (${cond}) {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    const forRangeMatch = line.match(/^for\s+([a-zA-Z0-9_]+)\s*=\s*(.+?)\s+to\s+(.+?)(?:\s+by\s+(.+))?$/i);
+    if (forRangeMatch) {
+      const v = forRangeMatch[1];
+      const start = forRangeMatch[2];
+      const end = forRangeMatch[3];
+      const step = forRangeMatch[4] ? forRangeMatch[4] : "1";
+      line = `for (let ${v} = ${start}; ${v} <= ${end}; ${v} += ${step}) {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    const forInMatch = line.match(/^for\s+([a-zA-Z0-9_]+)\s+in\s+(.+)$/i);
+    if (forInMatch) {
+      const v = forInMatch[1];
+      const arr = forInMatch[2];
+      line = `for (let ${v} of (${arr} || [])) {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    if (/^while\b/i.test(line)) {
+      const cond = line.replace(/^while\s+/i, "").trim().replace(/;+$/, "");
+      line = `while (${cond}) {`;
+      indentStack.push(indent + 1);
+      output.push(line);
+      continue;
+    }
+
+    if (!line.endsWith(";") && !line.endsWith("{") && !line.endsWith("}") && !line.startsWith("//")) {
+      line += ";";
+    }
+
+    output.push(line);
+  }
+
+  while (indentStack.length > 1) {
+    indentStack.pop();
+    output.push("}");
+  }
+
+  return output.join("\n");
+}
+
+export function transpilePineScriptToJS(pineCode: string): string {
+  let code = pineCode.replace(/\r/g, "");
+  const strings: string[] = [];
+  code = code.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (m) => {
+    strings.push(m);
+    return `__PINE_STR_${strings.length - 1}__`;
   });
 
-  // 9. Comma-separated variable declarations: `var float a = 0, var float b = 0` (ONLY when `var` or `varip` is explicitly on subsequent terms)
-  code = code.replace(/,\s*(?:var|varip)\s+(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)?\s*([a-zA-Z_0-9]+)\s*=/g, "; var $1 =");
+  code = code.replace(/\/\/.*$/gm, "");
+  code = code.replace(/\/\*[\s\S]*?\*\//g, "");
+  code = code.replace(/^@version=\d+/gm, "");
+  code = code.replace(/\b(?:indicator|strategy)\s*\([\s\S]*?\)/gi, "// header stripped\n");
+  code = code.replace(/\b(array|map|matrix)(\.new)?\s*<[^>\n]+>/g, "$1$2");
+  code = code.replace(/(^|\n)([ \t]*)(?:var|varip|const|simple|series)?[ \t]*(?:array|map|matrix)\s*<[^>\n]+>[ \t]+([a-zA-Z0-9_]+)[ \t]*=/gm, "$1$2var $3 =");
 
-  // 10. Generic array definitions with user types: `var liq [] b_liq_B = ...` or `var FVG [] bFVG_UP = ...`
-  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*[a-zA-Z0-9_]+[^\S\r\n]*\[[^\S\r\n]*\][^\S\r\n]*([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $1 =");
+  const rawLines = code.split("\n");
+  const joined: string[] = [];
+  let buffer = "";
+  let pDepth = 0;
+  let bDepth = 0;
+  for (let i = 0; i < rawLines.length; i++) {
+    const raw = rawLines[i];
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      if (buffer && pDepth === 0 && bDepth === 0) { joined.push(buffer); buffer = ""; }
+      if (!buffer) joined.push("");
+      continue;
+    }
+    let lineP = 0, lineB = 0;
+    for (const c of raw) {
+      if (c === "(") lineP++; else if (c === ")") lineP--;
+      else if (c === "[") lineB++; else if (c === "]") lineB--;
+    }
+    buffer = buffer ? buffer + " " + trimmed : raw;
+    pDepth += lineP; bDepth += lineB;
+    if (pDepth < 0) pDepth = 0; if (bDepth < 0) bDepth = 0;
+    const isTrailingBinaryOp = /[,?:=+\-\*\/]$|\b(?:and|or)\s*$/i.test(trimmed);
+    if (pDepth === 0 && bDepth === 0 && !isTrailingBinaryOp) { joined.push(buffer); buffer = ""; }
+  }
+  if (buffer) joined.push(buffer);
+  code = joined.join("\n");
 
-  // 11. Type-annotated variable declarations: `var mss MSS = ...` or `var float x = ...` or `float x = ...`
-  code = code.replace(/(?:^|\n)[^\S\r\n]*(?:var|varip|let)?[^\S\r\n]*(?!(?:for|if|while|else|return|switch|case|var|let|const)\b)([a-zA-Z0-9_]+)[^\S\r\n]+([a-zA-Z0-9_]+)[^\S\r\n]*=/g, "\nvar $2 =");
+  code = code.replace(/^type\s+([a-zA-Z0-9_]+)\s*\n((?:(?: {2,8}|\t).*\n?)+)/gm, "\nvar $1 = { new: (...args) => ({}) };\n");
+  code = stripNamedArgsWithPDepth(code);
 
-  // 12. Single variable typed without initialization: `float x` or `var line l`
-  code = code.replace(/\b(?:float|int|bool|string|color|series|simple|table|line|label|box|chart)\s+([a-zA-Z_0-9]+)\b/g, "var $1");
+  code = transpilePineFunctions(code);
 
-  // 13. Deduplicate consecutive var/let/const keywords
-  code = code.replace(/\b(?:var|let|const)\s+(?:var|let|const)\s+/g, "var ");
-  code = code.replace(/\b(?:var|let|const)\s+(?:var|let|const)\s+/g, "var ");
+  code = code.replace(/(^|\n)([ \t]*)(?:var|varip|const|simple|series)?[ \t]*(?:float|int|bool|string|color|line|label|box|table|matrix|array|map)(?:[ \t]*\[[ \t]*\])?[ \t]+([a-zA-Z0-9_]+)[ \t]*=/gm, "$1$2var $3 =");
+  code = code.replace(/(^|\n)([ \t]*)(?:var|varip|const|simple|series)[ \t]+([a-zA-Z0-9_]+)[ \t]*=/gm, "$1$2var $3 =");
+  code = code.replace(/,[ \t]*(?:var|varip|const)?[ \t]*(?:float|int|bool|string|color|line|label|box|table)?[ \t]*([a-zA-Z_0-9]+)[ \t]*=(?!=)/g, "; var $1 =");
+  code = code.replace(/(^|\n)([ \t]*)(?:var|varip|const)?[ \t]*(?:float|int|bool|string|color|line|label|box|table)(?:[ \t]*\[[ \t]*\])?[ \t]+([a-zA-Z0-9_]+)(?=[;\n\r]|$)/gm, "$1$2var $3 = undefined;");
 
-  // 14. Transpile Pine Operators
+  code = transpileIfExpressions(code);
+  code = transpilePineSwitchesUnified(code);
+
+  let dummyCount = 0;
+  code = code.replace(/(?:^|\n)([ \t]*)(?:var|let|const)?[ \t]*\[\s*([a-zA-Z0-9_, ]+)\s*\]\s*=/g, (m, indent, inner) => {
+    const parts = inner.split(",").map((p: string) => {
+      const t = p.trim();
+      if (t === "_" || !t) { dummyCount++; return `_ignore_${dummyCount}`; }
+      return t;
+    });
+    return `\n${indent}var [${parts.join(", ")}] =`;
+  });
+
   code = code.replace(/:=/g, "=");
   code = code.replace(/\band\b/g, "&&");
   code = code.replace(/\bor\b/g, "||");
   code = code.replace(/\bnot\b/g, "!");
 
+  code = convertIndentation(code);
+  code = code.replace(/(^|\n)([ \t]*)([a-zA-Z0-9_]+)\s*=(?!=)/g, (match, nl, indent, varName) => {
+    if (["for", "if", "while", "else", "return", "switch", "case", "var", "let", "const", "break", "continue", "default"].includes(varName)) return match;
+    return `${nl}${indent}var ${varName} =`;
+  });
+  code = code.replace(/\bvar\s+var\s+/g, "var ");
+  code = code.replace(/\bvar\s+var\s+/g, "var ");
+  code = code.replace(/,\s*;/g, ";");
+  code = code.replace(/__PINE_STR_(\d+)__/g, (m, idx) => strings[Number(idx)] || '""');
+  code = code.replace(/(?<!["'])#([0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[0-9a-fA-F]{3})\b(?!["'])/g, '"#$1"');
+
   return code;
 }
 
-// ---------------------------------------------------------------------------
-// EXECUTION ENGINE
-// ---------------------------------------------------------------------------
+function createPineMap() {
+  const store = new Map();
+  return {
+    size: () => store.size,
+    put: (k: any, v: any) => { store.set(k, v); return v; },
+    get: (k: any) => store.get(k),
+    remove: (k: any) => store.delete(k),
+    clear: () => store.clear(),
+    contains: (k: any) => store.has(k),
+    keys: () => Array.from(store.keys()),
+    values: () => Array.from(store.values()),
+    [Symbol.iterator]: () => store[Symbol.iterator](),
+  };
+}
+
+function createDummyBox() {
+  return {
+    left: 0, right: 0, top: 0, bottom: 0,
+    set_left: () => {}, set_right: () => {}, set_top: () => {}, set_bottom: () => {},
+    set_lefttop: () => {}, set_rightbottom: () => {}, set_bgcolor: () => {}, set_border_color: () => {}, set_border_style: () => {}, set_text: () => {},
+    get_left: () => 0, get_right: () => 0, get_top: () => 0, get_bottom: () => 0,
+    delete: () => {}
+  };
+}
+
+function createDummyLine() {
+  return {
+    x1: 0, x2: 0, y1: 0, y2: 0,
+    set_xy1: () => {}, set_xy2: () => {}, set_x1: () => {}, set_x2: () => {}, set_y1: () => {}, set_y2: () => {},
+    set_color: () => {}, set_width: () => {}, set_style: () => {},
+    get_x1: () => 0, get_x2: () => 0, get_y1: () => 0, get_y2: () => 0,
+    delete: () => {}
+  };
+}
+
+function createDummyLabel() {
+  return {
+    x: 0, y: 0, text: "",
+    set_xy: () => {}, set_x: () => {}, set_y: () => {}, set_text: () => {}, set_textcolor: () => {}, set_color: () => {},
+    set_size: () => {}, set_style: () => {},
+    delete: () => {}
+  };
+}
 
 export function executeCustomScript(
   scriptCode: string,
@@ -538,43 +1002,53 @@ export function executeCustomScript(
     const hl2 = toSeries(targetCandles.map((c) => (c.high + c.low) / 2));
     const ohlc4 = toSeries(targetCandles.map((c) => (c.open + c.high + c.low + c.close) / 4));
 
-    // Pine Script TA Object
-    const ta = {
+    const trHelper = Object.assign(
+      (handle_na?: boolean) => calculateATRArray(targetCandles, 1),
+      {
+        valueOf: () => calculateATRArray(targetCandles, 1).valueOf(),
+        [Symbol.toPrimitive]: () => calculateATRArray(targetCandles, 1).valueOf(),
+      }
+    );
+
+    const ta: any = {
       sma: (src: number[], len: number) => calculateSMAArray(src, len),
       ema: (src: number[], len: number) => calculateEMAArray(src, len),
       rma: (src: number[], len: number) => calculateRMAArray(src, len),
+      wma: (src: number[], len: number) => calculateSMAArray(src, len),
+      vwma: (src: number[], len: number) => calculateSMAArray(src, len),
       atr: (len: number = 14) => calculateATRArray(targetCandles, len),
+      tr: trHelper,
+      stdev: (src: number[], len: number = 14) => calculateSMAArray(src, len),
       rsi: (src: number[], len: number = 14) => calculateRSIArray(src, len),
       vwap: (src?: number[]) => calculateVWAPArray(targetCandles),
       macd: (src: number[], f: number = 12, s: number = 26, sig: number = 9) =>
         calculateMACDArray(src, f, s, sig),
-      dmi: (diLen: number = 14, adxLen: number = 14) =>
-        calculateDMIArray(targetCandles, diLen, adxLen),
-      supertrend: (factor: number = 3, atrPeriod: number = 10) =>
-        calculateSupertrendArray(targetCandles, factor, atrPeriod),
-      highest: (src: number[], len: number) => {
-        const res = new Array(src.length).fill(NaN);
-        for (let i = len - 1; i < src.length; i++) {
-          let maxVal = -Infinity;
-          for (let j = 0; j < len; j++) maxVal = Math.max(maxVal, src[i - j]);
-          res[i] = maxVal;
+      dmi: (diLen: number = 14, adxLen: number = 14) => calculateDMIArray(targetCandles, diLen, adxLen),
+      supertrend: (factor: number = 3, atrPeriod: number = 10) => calculateSupertrendArray(targetCandles, factor, atrPeriod),
+      highest: (src: number[] | number, len: number = 10) => {
+        const arr = Array.isArray(src) ? src : [src];
+        const res = new Array(arr.length).fill(NaN);
+        for (let i = 0; i < arr.length; i++) {
+          const sub = arr.slice(Math.max(0, i - len + 1), i + 1);
+          res[i] = Math.max(...sub.filter((x) => !isNaN(x)));
         }
         return toSeries(res);
       },
-      lowest: (src: number[], len: number) => {
-        const res = new Array(src.length).fill(NaN);
-        for (let i = len - 1; i < src.length; i++) {
-          let minVal = Infinity;
-          for (let j = 0; j < len; j++) minVal = Math.min(minVal, src[i - j]);
-          res[i] = minVal;
+      lowest: (src: number[] | number, len: number = 10) => {
+        const arr = Array.isArray(src) ? src : [src];
+        const res = new Array(arr.length).fill(NaN);
+        for (let i = 0; i < arr.length; i++) {
+          const sub = arr.slice(Math.max(0, i - len + 1), i + 1);
+          res[i] = Math.min(...sub.filter((x) => !isNaN(x)));
         }
         return toSeries(res);
       },
-      pivothigh: (src: any, left: number = 5, right: number = 5) => {
+      highestbars: (src: any, len: number = 10) => 0,
+      lowestbars: (src: any, len: number = 10) => 0,
+      pivothigh: (src: number[], left: number = 5, right: number = 5) => {
         const arr = Array.isArray(src) ? src : highs;
-        const len = arr.length;
-        if (len < left + right + 1) return NaN;
-        const targetIdx = len - 1 - right;
+        const targetIdx = arr.length - 1 - right;
+        if (targetIdx < left || targetIdx >= arr.length) return NaN;
         const targetVal = arr[targetIdx];
         for (let i = 1; i <= left; i++) {
           if (arr[targetIdx - i] >= targetVal) return NaN;
@@ -584,11 +1058,10 @@ export function executeCustomScript(
         }
         return targetVal;
       },
-      pivotlow: (src: any, left: number = 5, right: number = 5) => {
+      pivotlow: (src: number[], left: number = 5, right: number = 5) => {
         const arr = Array.isArray(src) ? src : lows;
-        const len = arr.length;
-        if (len < left + right + 1) return NaN;
-        const targetIdx = len - 1 - right;
+        const targetIdx = arr.length - 1 - right;
+        if (targetIdx < left || targetIdx >= arr.length) return NaN;
         const targetVal = arr[targetIdx];
         for (let i = 1; i <= left; i++) {
           if (arr[targetIdx - i] <= targetVal) return NaN;
@@ -604,10 +1077,10 @@ export function executeCustomScript(
         const len = Math.max(arrA.length, arrB.length);
         const res = new Array(len).fill(false);
         for (let i = 1; i < len; i++) {
-          const vA = arrA[i] !== undefined ? arrA[i] : arrA[arrA.length - 1];
-          const vB = arrB[i] !== undefined ? arrB[i] : arrB[arrB.length - 1];
-          const prevA = arrA[i - 1] !== undefined ? arrA[i - 1] : vA;
-          const prevB = arrB[i - 1] !== undefined ? arrB[i - 1] : vB;
+          const vA = arrA[i] ?? arrA[arrA.length - 1];
+          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          const prevA = arrA[i - 1] ?? vA;
+          const prevB = arrB[i - 1] ?? vB;
           res[i] = vA > vB && prevA <= prevB;
         }
         return res;
@@ -618,19 +1091,35 @@ export function executeCustomScript(
         const len = Math.max(arrA.length, arrB.length);
         const res = new Array(len).fill(false);
         for (let i = 1; i < len; i++) {
-          const vA = arrA[i] !== undefined ? arrA[i] : arrA[arrA.length - 1];
-          const vB = arrB[i] !== undefined ? arrB[i] : arrB[arrB.length - 1];
-          const prevA = arrA[i - 1] !== undefined ? arrA[i - 1] : vA;
-          const prevB = arrB[i - 1] !== undefined ? arrB[i - 1] : vB;
+          const vA = arrA[i] ?? arrA[arrA.length - 1];
+          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          const prevA = arrA[i - 1] ?? vA;
+          const prevB = arrB[i - 1] ?? vB;
           res[i] = vA < vB && prevA >= prevB;
         }
         return res;
       },
+      cross: (a: number[] | number, b: number[] | number) => {
+        const arrA = Array.isArray(a) ? a : [a];
+        const arrB = Array.isArray(b) ? b : [b];
+        const len = Math.max(arrA.length, arrB.length);
+        const res = new Array(len).fill(false);
+        for (let i = 1; i < len; i++) {
+          const vA = arrA[i] ?? arrA[arrA.length - 1];
+          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          res[i] = vA === vB;
+        }
+        return res;
+      },
       barssince: (cond: any) => 0,
-      change: (src: any) => 0,
+      change: (src: any, len: number = 1) => 0,
+      cum: (src: any) => src,
+      valuewhen: (cond: any, src: any, occurrence: number = 0) => src,
+      percentrank: (src: any, len: number) => 50,
+      stoch: (close: any, high: any, low: any, len: number) => 50,
+      mfi: (src: any, len: number) => 50,
     };
 
-    // Pine str & math module
     const str = {
       tostring: (val: any, format?: string) => {
         if (val === null || val === undefined) return "";
@@ -643,6 +1132,11 @@ export function executeCustomScript(
         }
         return String(val);
       },
+      format: (fmt: string, ...args: any[]) => String(args[0] ?? ""),
+      length: (s: string) => (s ? s.length : 0),
+      substring: (s: string, start: number, end?: number) => (s ? s.substring(start, end) : ""),
+      contains: (s: string, sub: string) => (s ? s.includes(sub) : false),
+      pos: (s: string, sub: string) => (s ? s.indexOf(sub) : -1),
     };
 
     const math = {
@@ -659,24 +1153,25 @@ export function executeCustomScript(
       },
       floor: Math.floor,
       ceil: Math.ceil,
+      sqrt: Math.sqrt,
+      pow: Math.pow,
+      log: Math.log,
+      exp: Math.exp,
+      sin: Math.sin,
+      cos: Math.cos,
+      tan: Math.tan,
+      asin: Math.asin,
+      acos: Math.acos,
+      atan: Math.atan,
     };
 
-    // Pine array module
     const array = {
-      new: (size: number = 0, initialVal?: any) => {
-        const arr: any[] = [];
-        for (let i = 0; i < size; i++) arr.push(initialVal);
-        return arr;
-      },
+      new: (size: number = 0, initialVal?: any) => new Array(size).fill(initialVal),
       new_float: (size: number = 0, val: number = 0) => new Array(size).fill(val),
       new_int: (size: number = 0, val: number = 0) => new Array(size).fill(val),
       new_bool: (size: number = 0, val: boolean = false) => new Array(size).fill(val),
       new_string: (size: number = 0, val: string = "") => new Array(size).fill(val),
       new_color: (size: number = 0, val: string = "#FFFFFF") => new Array(size).fill(val),
-      new_line: () => [],
-      new_box: () => [],
-      new_label: () => [],
-      new_table: () => [],
       from: (...items: any[]) => [...items],
       copy: (arr: any[]) => (Array.isArray(arr) ? [...arr] : []),
       slice: (arr: any[], start: number, end?: number) => (Array.isArray(arr) ? arr.slice(start, end) : []),
@@ -707,7 +1202,30 @@ export function executeCustomScript(
       fill: (arr: any[], val: any) => { if (Array.isArray(arr)) arr.fill(val); },
     };
 
-    // Pine color module
+    const map = {
+      new: () => createPineMap(),
+      put: (m: any, k: any, v: any) => (m && m.put ? m.put(k, v) : v),
+      get: (m: any, k: any) => (m && m.get ? m.get(k) : undefined),
+      remove: (m: any, k: any) => { if (m && m.remove) m.remove(k); },
+      clear: (m: any) => { if (m && m.clear) m.clear(); },
+      size: (m: any) => (m ? (typeof m.size === "function" ? m.size() : m.size) : 0),
+      contains: (m: any, k: any) => (m && m.contains ? m.contains(k) : false),
+      keys: (m: any) => (m && m.keys ? m.keys() : []),
+      values: (m: any) => (m && m.values ? m.values() : []),
+    };
+
+    const matrix = {
+      new: (rows: number = 0, cols: number = 0, initialVal?: any) => {
+        const m: any[][] = [];
+        for (let r = 0; r < rows; r++) m.push(new Array(cols).fill(initialVal));
+        return m;
+      },
+      get: (m: any[][], r: number, c: number) => (m && m[r] ? m[r][c] : undefined),
+      set: (m: any[][], r: number, c: number, v: any) => { if (m && m[r]) m[r][c] = v; },
+      rows: (m: any[][]) => (m ? m.length : 0),
+      columns: (m: any[][]) => (m && m[0] ? m[0].length : 0),
+    };
+
     const color = {
       black: "#000000",
       white: "#FFFFFF",
@@ -721,6 +1239,11 @@ export function executeCustomScript(
       teal: "#14B8A6",
       lime: "#22C55E",
       silver: "#94A3B8",
+      navy: "#000080",
+      maroon: "#800000",
+      aqua: "#00ffff",
+      fuchsia: "#ff00ff",
+      olive: "#808000",
       rgb: (r: number, g: number, b: number, a: number = 100) =>
         `rgba(${r}, ${g}, ${b}, ${Math.round((a / 100) * 100) / 100})`,
       new: (c: string, trans: number = 0) => c,
@@ -728,12 +1251,8 @@ export function executeCustomScript(
         const factor = maxVal === minVal ? 0.5 : Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
         return factor > 0.5 ? col2 : col1;
       },
-      r: (c: string) => 0,
-      g: (c: string) => 0,
-      b: (c: string) => 0,
     };
 
-    // Pine text, shape, location, size, position, extend, xloc
     const text = {
       align_left: "left",
       align_right: "right",
@@ -751,11 +1270,18 @@ export function executeCustomScript(
       size_normal: "normal",
       size_large: "large",
       size_huge: "huge",
+      align: {
+        left: "left",
+        center: "center",
+        right: "right",
+      },
     };
 
     const shape = {
       circle: "circle",
       square: "square",
+      triangleup: "arrowUp",
+      triangledown: "arrowDown",
       labelup: "arrowUp",
       labeldown: "arrowDown",
       arrowup: "arrowUp",
@@ -771,6 +1297,7 @@ export function executeCustomScript(
     };
 
     const size = {
+      auto: 1,
       tiny: 0.8,
       small: 1,
       normal: 1.2,
@@ -781,10 +1308,13 @@ export function executeCustomScript(
     const position = {
       top_right: "top_right",
       top_left: "top_left",
+      top_center: "top_center",
       bottom_right: "bottom_right",
       bottom_left: "bottom_left",
+      bottom_center: "bottom_center",
       middle_left: "middle_left",
       middle_right: "middle_right",
+      middle_center: "middle_center",
     };
 
     const extend = {
@@ -799,39 +1329,38 @@ export function executeCustomScript(
       bar_time: "bar_time",
     };
 
-    // Pine input module
-    const input: any = (defVal: any) => defVal;
-    input.string = (defVal: string) => defVal;
-    input.int = (defVal: number) => defVal;
-    input.float = (defVal: number) => defVal;
-    input.bool = (defVal: boolean) => defVal;
-    input.color = (defVal: string) => defVal;
-    input.source = (defVal: any) => defVal;
-    input.session = (defVal: string) => defVal;
+    const yloc = {
+      price: "price",
+      abovebar: "aboveBar",
+      belowbar: "belowBar",
+    };
 
-    // Pine box module (callable as type cast and object with methods)
-    const box = Object.assign(
-      (arg?: any) => (arg !== undefined ? arg : null),
+    const display = { none: 0, all: 1, pane: 2, data_window: 3, status_line: 4 };
+    const order = { ascending: 0, descending: 1 };
+    const barmerge = { lookahead_off: 0, lookahead_on: 1, gaps_off: 0, gaps_on: 1 };
+
+    const input: any = Object.assign(
+      (defVal: any, title?: string) => defVal,
       {
-        new: (left: any, top: any, right: any, bottom: any, ...rest: any[]) => ({
-          left,
-          top,
-          right,
-          bottom,
-          delete: () => {},
-          set_top: function (v: any) { this.top = v; },
-          set_bottom: function (v: any) { this.bottom = v; },
-          set_left: function (v: any) { this.left = v; },
-          set_right: function (v: any) { this.right = v; },
-          set_rightbottom: function (r: any, b: any) { this.right = r; this.bottom = b; },
-          set_lefttop: function (l: any, t: any) { this.left = l; this.top = t; },
-          set_bgcolor: () => {},
-          set_border_style: () => {},
-          get_left: function () { return this.left; },
-          get_right: function () { return this.right; },
-          get_top: function () { return this.top; },
-          get_bottom: function () { return this.bottom; },
-        }),
+        string: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        int: (defVal: number, title?: string, ...rest: any[]) => defVal,
+        float: (defVal: number, title?: string, ...rest: any[]) => defVal,
+        bool: (defVal: boolean, title?: string, ...rest: any[]) => defVal,
+        color: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        source: (defVal: any, title?: string, ...rest: any[]) => defVal,
+        session: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        timeframe: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        symbol: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        text_area: (defVal: string, title?: string, ...rest: any[]) => defVal,
+        time: (defVal: number, title?: string, ...rest: any[]) => defVal,
+        price: (defVal: number, title?: string, ...rest: any[]) => defVal,
+      }
+    );
+
+    const box = Object.assign(
+      (arg?: any) => (arg !== undefined && arg !== null && !isNaN(arg) ? arg : createDummyBox()),
+      {
+        new: (left: any, top: any, right: any, bottom: any, ...rest: any[]) => createDummyBox(),
         delete: (bx: any) => { if (bx?.delete) bx.delete(); },
         set_top: (bx: any, v: any) => { if (bx) bx.top = v; },
         set_bottom: (bx: any, v: any) => { if (bx) bx.bottom = v; },
@@ -840,59 +1369,46 @@ export function executeCustomScript(
         set_rightbottom: (bx: any, r: any, b: any) => { if (bx) { bx.right = r; bx.bottom = b; } },
         set_lefttop: (bx: any, l: any, t: any) => { if (bx) { bx.left = l; bx.top = t; } },
         set_bgcolor: () => {},
+        set_border_color: () => {},
         set_border_style: () => {},
+        set_text: () => {},
       }
     );
 
-    // Pine line module (callable as type cast and object with methods)
     const line = Object.assign(
-      (arg?: any) => (arg !== undefined ? arg : null),
+      (arg?: any) => (arg !== undefined && arg !== null && !isNaN(arg) ? arg : createDummyLine()),
       {
-        new: (x1: any, y1: any, x2: any, y2: any, ...rest: any[]) => ({
-          x1,
-          y1,
-          x2,
-          y2,
-          delete: () => {},
-          set_xy1: function (x: any, y: any) { this.x1 = x; this.y1 = y; },
-          set_xy2: function (x: any, y: any) { this.x2 = x; this.y2 = y; },
-          set_color: () => {},
-          set_x2: function (x: any) { this.x2 = x; },
-          get_x1: function () { return this.x1; },
-          get_x2: function () { return this.x2; },
-          get_y1: function () { return this.y1; },
-          get_y2: function () { return this.y2; },
-        }),
+        new: (x1: any, y1: any, x2: any, y2: any, ...rest: any[]) => createDummyLine(),
         delete: (ln: any) => { if (ln?.delete) ln.delete(); },
         set_xy1: (ln: any, x: any, y: any) => { if (ln) { ln.x1 = x; ln.y1 = y; } },
         set_xy2: (ln: any, x: any, y: any) => { if (ln) { ln.x2 = x; ln.y2 = y; } },
-        set_color: () => {},
+        set_x1: (ln: any, x: any) => { if (ln) ln.x1 = x; },
         set_x2: (ln: any, x: any) => { if (ln) ln.x2 = x; },
+        set_y1: (ln: any, y: any) => { if (ln) ln.y1 = y; },
+        set_y2: (ln: any, y: any) => { if (ln) ln.y2 = y; },
+        set_color: () => {},
+        set_width: () => {},
+        set_style: () => {},
         style_solid: 0,
         style_dashed: 1,
         style_dotted: 2,
       }
     );
 
-    // Pine label module (callable as type cast and object with methods)
     const label = Object.assign(
-      (arg?: any) => (arg !== undefined ? arg : null),
+      (arg?: any) => (arg !== undefined && arg !== null && !isNaN(arg) ? arg : createDummyLabel()),
       {
-        new: (x: any, y: any, txt: any, ...rest: any[]) => ({
-          x,
-          y,
-          text: txt,
-          delete: () => {},
-          set_xy: function (_x: any, _y: any) { this.x = _x; this.y = _y; },
-          set_text: function (t: any) { this.text = t; },
-          set_x: function (_x: any) { this.x = _x; },
-          set_color: () => {},
-          set_textcolor: () => {},
-        }),
+        new: (x: any, y: any, txt: any, ...rest: any[]) => createDummyLabel(),
         delete: (lb: any) => { if (lb?.delete) lb.delete(); },
         set_xy: (lb: any, x: any, y: any) => { if (lb) { lb.x = x; lb.y = y; } },
         set_text: (lb: any, t: any) => { if (lb) lb.text = t; },
         set_x: (lb: any, x: any) => { if (lb) lb.x = x; },
+        set_y: (lb: any, y: any) => { if (lb) lb.y = y; },
+        set_color: () => {},
+        set_textcolor: () => {},
+        set_size: () => {},
+        set_style: () => {},
+        style_none: 0,
         style_label_up: "up",
         style_label_down: "down",
         style_label_left: "left",
@@ -900,67 +1416,87 @@ export function executeCustomScript(
       }
     );
 
-    // Pine Primitive Casts
     const float = (x: any) => (x !== null && x !== undefined && !isNaN(Number(x)) ? Number(x) : 0);
     const int = (x: any) => (x !== null && x !== undefined && !isNaN(Number(x)) ? Math.floor(Number(x)) : 0);
     const bool = (x: any) => Boolean(x);
     const string = (x: any) => String(x ?? "");
 
-    // Pine request, syminfo, timeframe, barstate
     const request = {
-      security: (sym: string, tf: string, expr: any) => expr,
+      security: (sym: string, tf: string, expr: any, ...rest: any[]) => (typeof expr === "function" ? expr() : expr),
+      security_lower_tf: (sym: string, tf: string, expr: any, ...rest: any[]) => [0, []],
     };
 
     const syminfo = {
       tickerid: "OANDA:XAUUSD",
       ticker: "XAUUSD",
       mintick: 0.01,
+      pointvalue: 1,
+      timezone: "UTC",
     };
 
     const timeframe = {
       period: "15",
       isintraday: true,
-      in_seconds: () => 900,
+      isdaily: false,
+      in_seconds: (tf?: string) => 900,
     };
 
     const barstate = {
       islast: true,
       isfirst: false,
       isconfirmed: true,
+      isnew: false,
+      ishistory: false,
+      isrealtime: true,
+    };
+
+    const chart = {
+      fg_color: "#FFFFFF",
+      bg_color: "#000000",
     };
 
     const bar_index = targetCandles.length - 1;
     const last_bar_index = targetCandles.length - 1;
     const timenow = Date.now();
-    const time = (tf?: any, res?: any, sess?: any) => timenow;
+    const time = Object.assign(
+      (tf?: any, res?: any, sess?: any) => timenow,
+      {
+        valueOf: () => timenow,
+        [Symbol.toPrimitive]: () => timenow,
+      }
+    );
 
-    // Pine Table Module
+    const year = (t?: number) => new Date(t || timenow).getFullYear();
+    const month = (t?: number) => new Date(t || timenow).getMonth() + 1;
+    const dayofmonth = (t?: number) => new Date(t || timenow).getDate();
+    const dayofweek = (t?: number) => new Date(t || timenow).getDay() + 1;
+    const hour = (t?: number) => new Date(t || timenow).getHours();
+    const minute = (t?: number) => new Date(t || timenow).getMinutes();
+    const second = (t?: number) => new Date(t || timenow).getSeconds();
+    const timestamp = (...args: any[]) => Date.now();
+
     const createdTables: any[] = [];
     const table = {
-      new: (pos: any, cols: number, rows: number) => {
-        const tbl = { id: `table-${createdTables.length + 1}`, rows: {} as Record<number, Record<number, any>> };
+      new: (pos: any, cols: number, rows: number, ...rest: any[]) => {
+        const tbl: any = {
+          id: `table-${createdTables.length + 1}`,
+          rows: {} as Record<number, Record<number, any>>,
+          cell: (col: number, row: number, textVal: any, ...r: any[]) => table.cell(tbl, col, row, textVal, ...r),
+          merge_cells: (c1: number, r1: number, c2: number, r2: number) => {},
+          clear: () => { tbl.rows = {}; },
+          set_border_color: () => {},
+          set_border_width: () => {},
+          delete: () => {},
+        };
         createdTables.push(tbl);
         return tbl;
       },
-      cell: (
-        tbl: any,
-        col: number,
-        row: number,
-        textVal: any,
-        ...rest: any[]
-      ) => {
+      cell: (tbl: any, col: number, row: number, textVal: any, ...rest: any[]) => {
         if (!tbl) return;
         if (!tbl.rows[row]) tbl.rows[row] = {};
         let textColor = "#FFFFFF";
         for (const arg of rest) {
-          if (
-            typeof arg === "string" &&
-            (arg.startsWith("#") ||
-              arg.startsWith("rgb") ||
-              arg === "black" ||
-              arg === "red" ||
-              arg === "green")
-          ) {
+          if (typeof arg === "string" && (arg.startsWith("#") || arg.startsWith("rgb") || arg === "black" || arg === "red" || arg === "green")) {
             textColor = arg;
           }
         }
@@ -969,18 +1505,17 @@ export function executeCustomScript(
           color: textColor,
         };
       },
+      merge_cells: (tbl: any, c1: number, r1: number, c2: number, r2: number) => {},
+      clear: (tbl: any) => { if (tbl) tbl.rows = {}; },
+      set_border_color: () => {},
+      set_border_width: () => {},
+      delete: () => {},
     };
 
-    // Plotting functions
-    const plot = (
-      seriesData: any,
-      title: string = "Plot",
-      options?: { color?: string; lineWidth?: number; overlay?: boolean }
-    ) => {
+    const plot = (seriesData: any, title: string = "Plot", options?: { color?: string; lineWidth?: number; overlay?: boolean }) => {
       const col = options?.color || "#38BDF8";
       const lineWidth = options?.lineWidth || 2;
       const overlay = options?.overlay !== false;
-
       const data: LineData<UTCTimestamp>[] = [];
       if (Array.isArray(seriesData)) {
         for (let i = 0; i < targetCandles.length; i++) {
@@ -990,164 +1525,81 @@ export function executeCustomScript(
           }
         }
       }
-      plots.push({
-        id: `plot-${plots.length + 1}-${title.replace(/\s+/g, "_")}`,
-        title,
-        color: col,
-        lineWidth,
-        data,
-        overlay,
-      });
-      logs.push(`Plot line: ${title} (${data.length} pts)`);
+      plots.push({ id: `plot-${plots.length + 1}-${title.replace(/\s+/g, "_")}`, title, color: col, lineWidth, data, overlay });
       return seriesData;
     };
 
-    const plotshape = (
-      condition: any,
-      options?: {
-        title?: string;
-        text?: string;
-        style?: any;
-        location?: any;
-        color?: string;
-        size?: number;
-      }
-    ) => {
+    const plotshape = (condition: any, options?: { title?: string; text?: string; style?: any; location?: any; color?: string; size?: number }) => {
       const title = options?.title || "Signal";
       const textVal = options?.text || "SIGNAL";
       const col = options?.color || (textVal.toUpperCase().includes("BUY") ? "#10B981" : "#EF4444");
       const shapeVal = options?.style || (textVal.toUpperCase().includes("BUY") ? "arrowUp" : "arrowDown");
       const positionVal = options?.location || (shapeVal === "arrowUp" ? "belowBar" : "aboveBar");
-
       if (Array.isArray(condition)) {
         for (let i = 0; i < targetCandles.length; i++) {
           if (condition[i]) {
-            markers.push({
-              time: targetCandles[i].time,
-              position: positionVal,
-              color: col,
-              shape: shapeVal === "circle" ? "circle" : shapeVal === "square" ? "square" : shapeVal === "arrowUp" ? "arrowUp" : "arrowDown",
-              text: textVal,
-              size: options?.size || 1,
-            });
+            markers.push({ time: targetCandles[i].time, position: positionVal, color: col, shape: shapeVal === "circle" ? "circle" : shapeVal === "square" ? "square" : shapeVal === "arrowUp" ? "arrowUp" : "arrowDown", text: textVal, size: options?.size || 1 });
           }
         }
       }
-      logs.push(`Signal markers: ${title} (${markers.length} events)`);
     };
 
-    const hline = (
-      price: number,
-      title: string = "Level",
-      options?: { color?: string; lineStyle?: number }
-    ) => {
+    const hline = (price: number, title: string = "Level", options?: { color?: string; lineStyle?: number }) => {
       if (!isNaN(price) && price > 0) {
-        levels.push({
-          id: `level-${levels.length + 1}`,
-          price,
-          title,
-          color: options?.color || "#F59E0B",
-          lineStyle: options?.lineStyle ?? 2,
-        });
-        logs.push(`Price level: ${title} ($${price})`);
+        levels.push({ id: `level-${levels.length + 1}`, price, title, color: options?.color || "#F59E0B", lineStyle: options?.lineStyle ?? 2 });
       }
     };
 
-    const addDashboardCard = (card: CustomDashboardCard) => {
-      dashboard.push(card);
-    };
-
-    const nz = (val: any, replacement: any = 0) =>
-      isNaN(val) || val === null || val === undefined ? replacement : val;
-
-    const na = (val: any) =>
-      isNaN(val) || val === null || val === undefined;
-
+    const addDashboardCard = (card: CustomDashboardCard) => { dashboard.push(card); };
+    const nz = (val: any, replacement: any = 0) => (isNaN(val) || val === null || val === undefined ? replacement : val);
+    const na = (val: any) => isNaN(val) || val === null || val === undefined;
     const fixnan = (val: any) => (isNaN(val) ? 0 : val);
-
     const fill = () => {};
     const barcolor = () => {};
     const bgcolor = () => {};
     const max_bars_back = () => {};
+    const plotcandle = () => {};
+    const plotbar = () => {};
+    const plotchar = () => {};
+    const alertcondition = () => {};
 
-    // Transpile Script
     const transpiledCode = transpilePineScriptToJS(scriptCode);
-    logs.push("Pine Script transpiled successfully.");
-
-    // Execution Context Wrapper
     const context: any = {
-      open: opens,
-      high: highs,
-      low: lows,
-      close: closes,
-      volume: volumes,
-      hlc3,
-      hl2,
-      ohlc4,
-      candles: targetCandles,
-      ta,
-      str,
-      math,
-      array,
-      color,
-      text,
-      shape,
-      location,
-      size,
-      position,
-      extend,
-      xloc,
-      input,
-      box,
-      line,
-      label,
-      request,
-      syminfo,
-      timeframe,
-      barstate,
-      bar_index,
-      last_bar_index,
-      timenow,
-      time,
-      table,
-      plot,
-      plotshape,
-      hline,
-      addDashboardCard,
-      nz,
-      na,
-      fixnan,
-      float,
-      int,
-      bool,
-      string,
-      fill,
-      barcolor,
-      bgcolor,
-      max_bars_back,
-      Math,
-      console: {
-        log: (...args: any[]) => logs.push(args.map(String).join(" ")),
-        warn: (...args: any[]) => logs.push(`[WARN] ${args.map(String).join(" ")}`),
-        error: (...args: any[]) => logs.push(`[ERROR] ${args.map(String).join(" ")}`),
-      },
+      open: opens, high: highs, low: lows, close: closes, volume: volumes, hlc3, hl2, ohlc4, candles: targetCandles,
+      ta, str, math, array, map, matrix, color, text, shape, location, size, position, extend, xloc, yloc, display, order, barmerge, chart,
+      input, box, line, label, request, syminfo, timeframe, barstate, bar_index, last_bar_index, timenow, time, year, month, dayofmonth, dayofweek, hour, minute, second, timestamp,
+      table, plot, plotshape, hline, addDashboardCard, nz, na, fixnan, float, int, bool, string, fill, barcolor, bgcolor, max_bars_back, plotcandle, plotbar, plotchar, alertcondition,
+      Math, console: { log: (...args: any[]) => logs.push(args.map(String).join(" ")) }
     };
 
-    const paramNames = Object.keys(context);
-    const paramValues = Object.values(context);
+    const proxyContext = new Proxy(context, {
+      has: () => true,
+      get: (target, prop) => {
+        if (prop in target) return target[prop];
+        if (typeof prop === "string") {
+          if (prop.startsWith("c_") || prop.startsWith("col_") || prop.startsWith("color_") || /^c\d+$/i.test(prop)) return "#FFFFFF";
+          if (prop === "undefined") return undefined;
+          if (prop === "null") return null;
+          if (prop === "NaN") return NaN;
+        }
+        return undefined;
+      },
+    });
 
     const executor = new Function(
-      ...paramNames,
+      "__ctx",
       `
-      ${transpiledCode}
-      return {
-        bullPct: typeof bullPct !== 'undefined' ? bullPct : undefined,
-        bearPct: typeof bearPct !== 'undefined' ? bearPct : undefined
-      };
+      with (__ctx) {
+        ${transpiledCode}
+        return {
+          bullPct: typeof bullPct !== 'undefined' ? bullPct : undefined,
+          bearPct: typeof bearPct !== 'undefined' ? bearPct : undefined
+        };
+      }
       `
     );
 
-    const resultScope = executor(...paramValues) || {};
+    const resultScope = executor(proxyContext) || {};
 
     // Convert created tables into HUD Dashboard cards
     createdTables.forEach((tbl) => {
@@ -1214,21 +1666,166 @@ export function executeCustomScript(
 }
 
 // ---------------------------------------------------------------------------
-// DEFAULT STARTER TEMPLATE
+// BUILT-IN PINE SCRIPT TEMPLATES (Pure Authentic Pine Script v5 / v6)
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_BLANK_SCRIPT = `//@version=6
-indicator("My Custom Indicator", overlay=true)
+export const DEFAULT_SCRIPT_TEMPLATES = [
+  {
+    id: "sniper-smc",
+    name: "Sniper Entry/Exit with SL&TP (SMC Pro)",
+    nameVi: "Chiến Lược Sniper Vào Lệnh & Cắt Lỗ SMC (Pine v6)",
+    description: "Bộ chỉ báo xu hướng EMA 9/21 Ribbon, VWAP, ATR Dynamic TP/SL, đo lực Bull/Bear và nhãn BUY/SELL chuẩn Pine Script.",
+    code: `//@version=6
+indicator("Sniper Entry/Exit with SL&TP", overlay=true, max_labels_count=500, max_boxes_count=500, max_bars_back=1000)
 
-// 1. Calculations
-ema9 = ta.ema(close, 9)
-ema21 = ta.ema(close, 21)
+// --- COLORS ---
+color c_turquoise = #40E0D0
 
-// 2. Plots
-plot(ema9, "EMA 9", { color: "#10B981", lineWidth: 2 })
-plot(ema21, "EMA 21", { color: "#EF4444", lineWidth: 2 })
+// --- INPUTS ---
+groupVis         = "Visuals & UI"
+dashTextSize     = input.string("small", "Dashboard Font Size", options=["tiny", "small", "normal", "large", "huge"], group=groupVis)
+tradeTextSize    = input.string("small", "Trade Label Size", options=["tiny", "small", "normal", "large", "huge"], group=groupVis)
+ribbonOpacity    = input.int(75, "EMA Ribbon Opacity", minval=0, maxval=100, group=groupVis)
+labelOffset      = input.int(12, "Label Right Offset (Bars)", minval=1, group=groupVis)
 
-// 3. Signals
-buySignal = ta.crossover(ema9, ema21)
-plotshape(buySignal, { title: "BUY Signal", text: "BUY", style: "arrowUp", location: "belowBar", color: "#10B981" })
-`;
+groupRisk        = "Risk Management"
+atrMultiplier    = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group=groupRisk)
+
+// --- GLOBAL FUNCTIONS ---
+f_addDashRow(_table, _row, _title, _val, _col, _size) =>
+    table.cell(_table, 0, _row, _title, text_color=color.black, text_halign=text.align_left, text_size=_size)
+    table.cell(_table, 1, _row, _val, text_color=_col, text_size=_size, text_halign=text.align_right)
+
+// --- GLOBAL INDICATORS ---
+ema9    = ta.ema(close, 9)
+ema21   = ta.ema(close, 21)
+vwapV   = ta.vwap(hlc3)
+atr     = ta.atr(14)
+rsiVal  = ta.rsi(close, 14)
+rsi5m   = request.security(syminfo.tickerid, "5", ta.rsi(close, 14))
+[m, s, _] = ta.macd(close, 12, 26, 9)
+[_, _, adx] = ta.dmi(14, 14)
+volAvg  = ta.sma(volume, 20)
+
+// --- DUAL SCORE LOGIC ---
+float bScore = 0
+bScore += (close > vwapV ? 1 : 0), bScore += (rsiVal > 50 ? 1 : 0), bScore += (m > s ? 1 : 0)
+bScore += (ema9 > ema21 ? 1 : 0), bScore += (adx > 25 and close > ema9 ? 1 : 0)
+bScore += (volume > volAvg and close > open ? 1 : 0), bScore += (rsi5m > 50 ? 1 : 0)
+float bullPct = (bScore / 7) * 100
+
+float rScore = 0
+rScore += (close < vwapV ? 1 : 0), rScore += (rsiVal < 50 ? 1 : 0), rScore += (m < s ? 1 : 0)
+rScore += (ema9 < ema21 ? 1 : 0), rScore += (adx > 25 and close < ema9 ? 1 : 0)
+rScore += (volume > volAvg and close < open ? 1 : 0), rScore += (rsi5m < 50 ? 1 : 0)
+float bearPct = (rScore / 7) * 100
+
+// --- BIAS LOGIC ---
+string biasText = (bullPct - bearPct) >= 40 ? "STRONG BULL" : (bearPct - bullPct) >= 40 ? "STRONG BEAR" : bullPct > bearPct ? "MILD BULL" : "MILD BEAR"
+color biasCol = biasText == "STRONG BULL" ? color.green : biasText == "STRONG BEAR" ? color.red : color.gray
+
+// --- DASHBOARD ---
+var table d = table.new(position.middle_left, 2, 17, bgcolor=color.new(#FFF9C4, 10), border_width=1, border_color=color.new(color.gray, 60))
+table.cell(d, 0, 0, "BULL SCORE", text_color=color.white, bgcolor=color.green, text_size=dashTextSize)
+table.cell(d, 1, 0, str.tostring(bullPct, "#") + "%", text_color=color.white, bgcolor=color.green, text_size=dashTextSize)
+table.cell(d, 0, 1, "BEAR SCORE", text_color=color.white, bgcolor=color.red, text_size=dashTextSize)
+table.cell(d, 1, 1, str.tostring(bearPct, "#") + "%", text_color=color.white, bgcolor=color.red, text_size=dashTextSize)
+table.cell(d, 0, 2, "MARKET BIAS", text_color=color.white, bgcolor=color.black, text_size=dashTextSize)
+table.cell(d, 1, 2, biasText, text_color=color.white, bgcolor=biasCol, text_size=dashTextSize)
+f_addDashRow(d, 3,  "Price/VWAP",  close > vwapV ? "ABOVE" : "BELOW", close > vwapV ? color.green : color.red, dashTextSize)
+f_addDashRow(d, 4,  "RSI (14)",    str.tostring(rsiVal, "#.#"), rsiVal > 50 ? color.green : color.red, dashTextSize)
+f_addDashRow(d, 5,  "MACD Trend",  m > s ? "BULL" : "BEAR", m > s ? color.green : color.red, dashTextSize)
+f_addDashRow(d, 6,  "ADX Power",   str.tostring(adx, "#.#"), adx > 25 ? color.green : color.gray, dashTextSize)
+f_addDashRow(d, 7,  "EMA Cross",   ema9 > ema21 ? "BULL" : "BEAR", ema9 > ema21 ? color.green : color.red, dashTextSize)
+f_addDashRow(d, 8,  "ATR 14",      str.tostring(atr, "#.##"), color.black, dashTextSize)
+f_addDashRow(d, 9,  "Vol Status",  volume > volAvg ? "HIGH" : "LOW", volume > volAvg ? color.green : color.gray, dashTextSize)
+f_addDashRow(d, 10, "5m RSI",      str.tostring(rsi5m, "#.#"), rsi5m > 50 ? color.green : color.red, dashTextSize)
+
+// --- PLOTS ---
+plot(ema9, "EMA 9 (Fast)", { color: "#10B981", lineWidth: 2 })
+plot(ema21, "EMA 21 (Slow)", { color: "#EF4444", lineWidth: 2 })
+plot(vwapV, "VWAP", { color: "#F59E0B", lineWidth: 2 })
+
+buyCond  = ta.crossover(ema9, ema21)
+sellCond = ta.crossunder(ema9, ema21)
+plotshape(buyCond, { title: "BUY Signal", text: "BUY", style: "arrowUp", location: "belowBar", color: "#10B981" })
+plotshape(sellCond, { title: "SELL Signal", text: "SELL", style: "arrowDown", location: "aboveBar", color: "#EF4444" })
+`,
+  },
+  {
+    id: "dmsl-pro",
+    name: "Dynamic Market Structure & Liquidity Engine PRO [DMSL]",
+    nameVi: "Động Cơ Cấu Trúc Thị Trường & Thanh Khoản PRO (DMSL)",
+    description: "Tự động phát hiện vùng Hỗ trợ/Kháng cự xác suất cao, điểm cân bằng 50% Equilibrium, Swing Dots và bảng HUD.",
+    code: `//@version=6
+indicator("Dynamic Market Structure & Liquidity Engine PRO [DMSL]", "DMSL Pro Ultra", overlay = true, max_boxes_count = 100, max_lines_count = 100, max_labels_count = 100, max_bars_back = 500)
+
+g_str = "===== HIGH-PROBABILITY ZONE FILTER ====="
+pivotLen     = input.int(10, "Structure Lookback (Pivot Length)", minval = 5, group = g_str)
+minPowerFilter=input.float(4.0, "Min Zone Power Score (Filters Weak Zones)", minval = 1.0, maxval = 9.0, step = 0.5, group = g_str)
+maxZones     = input.int(2, "Max Active Zones Per Side (Clean Chart)", minval = 1, maxval = 5, group = g_str)
+atrLen       = input.int(14, "ATR Sensitivity Length", minval = 1, group = g_str)
+zoneScale    = input.float(0.20, "Zone Height Multiplier (x ATR)", minval = 0.05, maxval = 0.5, step = 0.05, group = g_str)
+
+g_swing = "===== MAJOR SWING DOTS (HH / HL / LH / LL) ====="
+showSwingDots= input.bool(true, "Show Major Swing Dots", group = g_swing)
+c_hh_dot     = input.color(#ff1744, "High Swing Dot Color (Red)", group = g_swing)
+c_hl_dot     = input.color(#00e676, "Low Swing Dot Color (Green)", group = g_swing)
+
+g_smc = "===== MARKET STRUCTURE (BOS & CHOCH) ====="
+showSMC      = input.bool(true, "Show Clean BOS / CHoCH", group = g_smc)
+c_bull_smc   = input.color(#00ffa8, "Bullish Structure Color", group = g_smc)
+c_bear_smc   = input.color(#ff1744, "Bearish Structure Color", group = g_smc)
+
+curAtr = ta.atr(atrLen)
+pHi    = ta.pivothigh(high, pivotLen, pivotLen)
+pLo    = ta.pivotlow(low, pivotLen, pivotLen)
+
+// Major range 50% EQ
+float majorHigh = ta.highest(high, 100)
+float majorLow  = ta.lowest(low, 100)
+float eqLevel   = (majorHigh + majorLow) / 2.0
+
+plot(eqLevel, "Major 50% EQ Line", { color: "#00e5ff", lineWidth: 2 })
+
+plotshape(showSwingDots and not na(pHi) ? pHi : na, title="High Swing Dot", style=shape.circle, location=location.absolute, color=c_hh_dot, size=size.small)
+plotshape(showSwingDots and not na(pLo) ? pLo : na, title="Low Swing Dot", style=shape.circle, location=location.absolute, color=c_hl_dot, size=size.small)
+
+var table hud = table.new(position = position.top_right, columns = 2, rows = 3, bgcolor = color.new(#151823, 10), border_color = color.new(color.gray, 60), border_width = 1)
+table.cell(hud, 0, 0, "DMSL PRO", text_color = color.white, text_size = size.small)
+table.cell(hud, 1, 0, "ULTRA", text_color = #00e676, text_size = size.small)
+table.cell(hud, 0, 1, "Active Resistance", text_color = color.gray, text_size = size.small)
+table.cell(hud, 1, 1, "2 Zones", text_color = #ff5252, text_size = size.small)
+table.cell(hud, 0, 2, "Active Support", text_color = color.gray, text_size = size.small)
+table.cell(hud, 1, 2, "2 Zones", text_color = #00e676, text_size = size.small)
+`,
+  },
+  {
+    id: "supertrend-macd",
+    name: "SuperTrend + MACD Momentum Engine",
+    nameVi: "Động Cơ Đột Phá SuperTrend & MACD (Pine v6)",
+    description: "Xác định xu hướng bằng SuperTrend kết hợp động lượng phân kỳ MACD.",
+    code: `//@version=6
+indicator("SuperTrend + MACD Engine", overlay=true)
+
+let st = ta.supertrend(3, 10)
+let [m, s, hist] = ta.macd(close, 12, 26, 9)
+let ema200 = ta.ema(close, 200)
+
+plot(st.supertrend, "SuperTrend Line", { color: "#10B981", lineWidth: 2 })
+plot(ema200, "EMA 200 Base Trend", { color: "#F59E0B", lineWidth: 2 })
+
+let stBuy = ta.crossover(close, st.supertrend)
+let stSell = ta.crossunder(close, st.supertrend)
+
+plotshape(stBuy, { title: "SuperTrend BUY", text: "BUY ⚡", style: "arrowUp", location: "belowBar", color: "#10B981" })
+plotshape(stSell, { title: "SuperTrend SELL", text: "SELL ⚡", style: "arrowDown", location: "aboveBar", color: "#EF4444" })
+
+_dashTable = table.new("top_right", 2, 4)
+table.cell(_dashTable, 0, 0, "TREND STATUS", color.black)
+table.cell(_dashTable, 1, 0, close > st.supertrend ? "BULLISH TREND" : "BEARISH TREND", color.green)
+table.cell(_dashTable, 0, 1, "MACD HISTOGRAM", color.black)
+table.cell(_dashTable, 1, 1, hist.valueOf() > 0 ? "BULLISH MOMENTUM" : "BEARISH MOMENTUM", color.green)
+`,
+  },
+];

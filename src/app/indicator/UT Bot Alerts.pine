@@ -1,0 +1,160 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Jahigginsenterprises
+// Original Logic Credit: QuantNomad
+
+//@version=6
+indicator("UT Bot Alerts [2026 Elite Edition]", shorttitle="UT Bot 2026", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. CONFIGURATION & INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Group: Buy Settings
+grp_buy    = "🟢 BUY SETTINGS (Long)"
+buy_key    = input.float(2.0, "Buy Key Value (Sensitivity)", minval=0.1, group=grp_buy, tooltip="Multiplier for the Buy Signal calculation.")
+buy_atr    = input.int(300, "Buy ATR Period", minval=1, group=grp_buy, tooltip="Lookback period for Buy signals. Higher = Slower/Smoother.")
+buy_col    = input.color(color.new(#00E676, 0), "Buy Line Color", group=grp_buy)
+buy_shape  = input.string("Label Up", "Buy Signal Shape", options=["Label Up", "Triangle Up", "Arrow Up", "Diamond"], group=grp_buy)
+
+// Group: Sell Settings
+grp_sell   = "🔴 SELL SETTINGS (Short)"
+sell_key   = input.float(2.0, "Sell Key Value (Sensitivity)", minval=0.1, group=grp_sell, tooltip="Multiplier for the Sell Signal calculation.")
+sell_atr   = input.int(1, "Sell ATR Period", minval=1, group=grp_sell, tooltip="Lookback period for Sell signals. Lower = Faster/Responsive.")
+sell_col   = input.color(color.new(#FF5252, 0), "Sell Line Color", group=grp_sell)
+sell_shape = input.string("Label Down", "Sell Signal Shape", options=["Label Down", "Triangle Down", "Arrow Down", "Diamond"], group=grp_sell)
+
+// Group: General Settings
+grp_gen    = "⚙️ GENERAL & VISUALS"
+use_ha     = input.bool(false, "Use Heikin Ashi Candles", group=grp_gen, tooltip="Calculates signals based on Heikin Ashi Close rather than standard Close.")
+show_dash  = input.bool(true, "Show Info Dashboard", group=grp_gen)
+line_width = input.int(2, "Trailing Stop Line Width", minval=1, maxval=5, group=grp_gen)
+bar_paint  = input.bool(true, "Color Candles", group=grp_gen)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. SMART CALCULATIONS (Dual Engine)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Source Handling (Standard vs Heikin Ashi)
+// In v6, we prefer request.security only if strictly necessary, but for HA on same timeframe, 
+// using the ticker's HA variant is the cleanest method.
+ticker_id = use_ha ? ticker.heikinashi(syminfo.tickerid) : syminfo.tickerid
+src = request.security(ticker_id, timeframe.period, close, lookahead = barmerge.lookahead_off)
+
+// Engine 1: Buy Logic (Waiting for Price to cross UP)
+// We use the Buy Parameters to calculate the "Ceiling" (Resistance)
+xATR_Buy  = ta.atr(buy_atr)
+nLoss_Buy = buy_key * xATR_Buy
+
+// Engine 2: Sell Logic (Waiting for Price to cross DOWN)
+// We use the Sell Parameters to calculate the "Floor" (Support)
+xATR_Sell  = ta.atr(sell_atr)
+nLoss_Sell = sell_key * xATR_Sell
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. STATE MACHINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float xATRTrailingStop = 0.0
+var int pos = 0
+
+// Current Stop Logic:
+// If we are LONG (pos=1), we use the SELL parameters (Floor) to trail price up.
+// If we are SHORT (pos=-1), we use the BUY parameters (Ceiling) to trail price down.
+
+float prev_stop = nz(xATRTrailingStop[1])
+int prev_pos    = nz(pos[1])
+
+// Dynamic switching logic
+if prev_pos == 1 // Currently Long
+    // Use Sell Engine for the Floor
+    float new_floor = src - nLoss_Sell
+    if src < prev_stop // Stop Hit! Switch to Short
+        xATRTrailingStop := src + nLoss_Buy // Initialize Ceiling
+        pos := -1
+    else // Still Long, trail up
+        xATRTrailingStop := math.max(prev_stop, new_floor)
+        pos := 1
+else // Currently Short (or start)
+    // Use Buy Engine for the Ceiling
+    float new_ceiling = src + nLoss_Buy
+    if src > prev_stop // Stop Hit! Switch to Long
+        xATRTrailingStop := src - nLoss_Sell // Initialize Floor
+        pos := 1
+    else // Still Short, trail down
+        xATRTrailingStop := math.min(prev_stop, new_ceiling)
+        pos := -1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. SIGNALS & PLOTTING
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Detection
+bool buy_signal  = pos == 1 and prev_pos == -1
+bool sell_signal = pos == -1 and prev_pos == 1
+
+// Dynamic Colors
+color current_color = pos == 1 ? buy_col : sell_col
+color text_col_dyn  = color.white
+
+// Plot Trailing Stop Line
+plot(xATRTrailingStop, "Trailing Stop", color=current_color, linewidth=line_width, style=plot.style_line)
+
+// Candle Coloring
+barcolor(bar_paint ? current_color : na)
+
+// Helper for Shapes
+get_shape(style_str) =>
+    switch style_str
+        "Label Up"      => shape.labelup
+        "Label Down"    => shape.labeldown
+        "Triangle Up"   => shape.triangleup
+        "Triangle Down" => shape.triangledown
+        "Arrow Up"      => shape.arrowup
+        "Arrow Down"    => shape.arrowdown
+        "Diamond"       => shape.diamond
+        => shape.circle
+
+// Plot Buy Signal
+plotshape(buy_signal, title="Buy Signal", style=get_shape(buy_shape), location=location.belowbar, color=buy_col, text="BUY", textcolor=text_col_dyn, size=size.tiny)
+
+// Plot Sell Signal
+plotshape(sell_signal, title="Sell Signal", style=get_shape(sell_shape), location=location.abovebar, color=sell_col, text="SELL", textcolor=text_col_dyn, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. DASHBOARD (2026 Feature)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table hud = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 50), border_width=1)
+
+if show_dash and barstate.islast
+    // Header
+    table.cell(hud, 0, 0, "UT BOT 2026", text_color=current_color, text_size=size.small, bgcolor=color.new(color.black, 0))
+    table.merge_cells(hud, 0, 0, 1, 0)
+    
+    // Status
+    table.cell(hud, 0, 1, "Status:", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(hud, 1, 1, pos == 1 ? "LONG 🟢" : "SHORT 🔴", text_color=current_color, text_size=size.small, text_halign=text.align_right)
+    
+    // Stop Price
+    table.cell(hud, 0, 2, "Stop Price:", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(hud, 1, 2, str.tostring(xATRTrailingStop, format.mintick), text_color=color.gray, text_size=size.small, text_halign=text.align_right)
+    
+    // Active ATR
+    float active_atr = pos == 1 ? xATR_Sell : xATR_Buy
+    table.cell(hud, 0, 3, "Active ATR:", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(hud, 1, 3, str.tostring(active_atr, format.mintick), text_color=color.gray, text_size=size.small, text_halign=text.align_right)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Legacy Alerts (for simple setup)
+alertcondition(buy_signal, "UT Bot Buy", "UT Bot Buy Signal Detected")
+alertcondition(sell_signal, "UT Bot Sell", "UT Bot Sell Signal Detected")
+
+// Dynamic Alerts (JSON format for bots)
+if buy_signal
+    alert('{"type": "buy", "price": ' + str.tostring(close) + ', "ticker": "' + syminfo.ticker + '"}', alert.freq_once_per_bar_close)
+
+if sell_signal
+    alert('{"type": "sell", "price": ' + str.tostring(close) + ', "ticker": "' + syminfo.ticker + '"}', alert.freq_once_per_bar_close)

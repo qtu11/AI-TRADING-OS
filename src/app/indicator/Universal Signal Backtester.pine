@@ -1,0 +1,800 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
+
+//@version=6
+indicator(title = "Universal Signal Backtester [LuxAlgo]", shorttitle = "LuxAlgo - Universal Signal Backtester", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Inputs
+//---------------------------------------------------------------------------------------------------------------------{
+sourceMode      = input.string("Predefined Crosses", "Source Mode", options = ["Predefined Crosses", "External Sources (Crossovers)", "External Signals (Triggers)"], group = "Source Settings")
+
+predefCross     = input.string("9/21 EMA Cross", "Predefined Cross", options = ["9/21 EMA Cross", "12/26 EMA Cross", "Golden/Death Cross (50/200 SMA)"], tooltip = "Used if Source Mode is Predefined Crosses.", group = "Source Settings")
+
+fastSource      = input.source(close, "External Fast Source", tooltip = "Only used if Source Mode is External Sources (Crossovers).", group = "Source Settings")
+slowSource      = input.source(open,  "External Slow Source", tooltip = "Only used if Source Mode is External Sources (Crossovers).", group = "Source Settings")
+
+extLongSignal   = input.source(close, "External Long Signal", tooltip = "Only used if Source Mode is External Signals (Triggers).", group = "Source Settings")
+extShortSignal  = input.source(close, "External Short Signal", tooltip = "Only used if Source Mode is External Signals (Triggers).", group = "Source Settings")
+signalLogic     = input.string("Not NA (Plotshape/Markers)", "External Signal Logic", options = ["Not NA (Plotshape/Markers)", "Crosses Over 0", "Crosses Under 0", "Value Changes", "Greater Than 0", "Less Than 0"], tooltip = "How should the script interpret the external signal?", group = "Source Settings")
+
+tradeDirection  = input.string("Both", "Trade Direction", options = ["Both", "Long Only", "Short Only"])
+
+useAtrFilter    = input.bool(false, "Use ATR Choppiness Filter", group = "Filters", tooltip = "Ignores signals when volatility (ATR) is below its average, helping to avoid choppy clustering.")
+atrFilterLen    = input.int(50, "ATR Smoothing Length", group = "Filters")
+
+distType        = input.string("ATR", "Distance Type", options = ["ATR", "Ticks", "Points/Fiat"], group = "Target Settings")
+atrLen          = input.int(14, "ATR Length", tooltip = "Only used if Distance Type is ATR", group = "Target Settings")
+
+useTp1          = input.bool(true, "Take Profit 1", inline="tp1", group = "Take Profit")
+tp1Val          = input.float(1.0, "", inline="tp1", group = "Take Profit", step=0.5)
+useTp2          = input.bool(true, "Take Profit 2", inline="tp2", group = "Take Profit")
+tp2Val          = input.float(2.0, "", inline="tp2", group = "Take Profit", step=0.5)
+useTp3          = input.bool(true, "Take Profit 3", inline="tp3", group = "Take Profit")
+tp3Val          = input.float(3.0, "", inline="tp3", group = "Take Profit", step=0.5)
+
+useSl1          = input.bool(true, "Stop Loss 1", inline="sl1", group = "Stop Loss")
+sl1Val          = input.float(1.5, "", inline="sl1", group = "Stop Loss", step=0.5)
+useSl2          = input.bool(true, "Stop Loss 2", inline="sl2", group = "Stop Loss")
+sl2Val          = input.float(2.5, "", inline="sl2", group = "Stop Loss", step=0.5)
+useSl3          = input.bool(true, "Stop Loss 3", inline="sl3", group = "Stop Loss")
+sl3Val          = input.float(3.5, "", inline="sl3", group = "Stop Loss", step=0.5)
+
+showDash        = input.bool(true, "Show Dashboard", group = "Dashboard")
+dashPos         = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Bottom Right", "Bottom Left"], group = "Dashboard")
+dashSize        = input.string("Small", "Dashboard Size", options = ["Tiny", "Small", "Normal", "Large"], group = "Dashboard")
+heatmapPeriod   = input.string("Days of Week", "Heatmap Period", options = ["Days of Week", "Months"], group = "Dashboard")
+suggestMetric   = input.string("Hit Rate", "Suggested TP Metric", options = ["Hit Rate", "Expected Profit", "Total Profit", "Risk/Reward"], group = "Dashboard")
+
+useCandleColor  = input.bool(true, "Gradient Candle Coloring", group = "Visuals")
+
+useCosts        = input.bool(false, "Simulate Spread & Commission", group = "Costs")
+costProfile     = input.string("Manual", "Cost Profile", options = ["Manual", "Forex (Avg)", "Crypto (Tier 1)", "Stocks (US)"], group = "Costs")
+manualSpread    = input.float(1.0, "Manual Spread (Ticks)", group = "Costs", tooltip = "Spread applied per round trip in ticks")
+manualComm      = input.float(0.01, "Manual Commission (%)", group = "Costs", tooltip = "Commission applied per round trip as a % of position value")
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Helper Functions
+//---------------------------------------------------------------------------------------------------------------------{
+get_block_char(float val, float max_val) =>
+    if max_val == 0 or val == 0
+        " "
+    else
+        float ratio = math.abs(val) / max_val
+        string res = " "
+        if ratio < 0.125
+            res := " "
+        else if ratio < 0.25
+            res := "▂"
+        else if ratio < 0.375
+            res := "▃"
+        else if ratio < 0.5
+            res := "▄"
+        else if ratio < 0.625
+            res := "▅"
+        else if ratio < 0.75
+            res := "▆"
+        else if ratio < 0.875
+            res := "▇"
+        else
+            res := "█"
+        res
+
+get_heatmap_color(float val, float maxV, float minV) =>
+    color c = #161616 // BACKGROUND
+    if val > 0 and maxV > 0
+        c := color.from_gradient(val, 0, maxV, color.new(#089981, 80), color.new(#089981, 10))
+    else if val < 0 and minV < 0
+        c := color.from_gradient(val, minV, 0, color.new(#f23645, 10), color.new(#f23645, 80))
+    c
+
+get_month_name(int i) =>
+    switch i
+        0 => "Jan"
+        1 => "Feb"
+        2 => "Mar"
+        3 => "Apr"
+        4 => "May"
+        5 => "Jun"
+        6 => "Jul"
+        7 => "Aug"
+        8 => "Sep"
+        9 => "Oct"
+        10=> "Nov"
+        11=> "Dec"
+
+get_day_name(int i) =>
+    switch i
+        0 => "Sun"
+        1 => "Mon"
+        2 => "Tue"
+        3 => "Wed"
+        4 => "Thu"
+        5 => "Fri"
+        6 => "Sat"
+
+format_time(int ms) =>
+    int days = math.round(ms / 86400000.0)
+    string res = str.tostring(days) + "d"
+    res
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Strategy Logic
+//---------------------------------------------------------------------------------------------------------------------{
+float fastLen = 9
+float slowLen = 21
+bool isEma = true
+
+if predefCross == "9/21 EMA Cross"
+    fastLen := 9
+    slowLen := 21
+    isEma := true
+else if predefCross == "12/26 EMA Cross"
+    fastLen := 12
+    slowLen := 26
+    isEma := true
+else if predefCross == "Golden/Death Cross (50/200 SMA)"
+    fastLen := 50
+    slowLen := 200
+    isEma := false
+
+get_ribbon_ma(bool is_ema, float len) =>
+    int l = math.round(len)
+    float e = ta.ema(close, l)
+    float s = ta.sma(close, l)
+    is_ema ? e : s
+
+float builtInFast = get_ribbon_ma(isEma, fastLen)
+float builtInSlow = get_ribbon_ma(isEma, slowLen)
+
+float stepLen = (slowLen - fastLen) / 10
+float r1 = get_ribbon_ma(isEma, fastLen + stepLen * 1)
+float r2 = get_ribbon_ma(isEma, fastLen + stepLen * 2)
+float r3 = get_ribbon_ma(isEma, fastLen + stepLen * 3)
+float r4 = get_ribbon_ma(isEma, fastLen + stepLen * 4)
+float r5 = get_ribbon_ma(isEma, fastLen + stepLen * 5)
+float r6 = get_ribbon_ma(isEma, fastLen + stepLen * 6)
+float r7 = get_ribbon_ma(isEma, fastLen + stepLen * 7)
+float r8 = get_ribbon_ma(isEma, fastLen + stepLen * 8)
+float r9 = get_ribbon_ma(isEma, fastLen + stepLen * 9)
+
+bool isPredef   = sourceMode == "Predefined Crosses"
+bool isExtCross = sourceMode == "External Sources (Crossovers)"
+bool isExtSig   = sourceMode == "External Signals (Triggers)"
+
+float activeFast = isPredef ? builtInFast : fastSource
+float activeSlow = isPredef ? builtInSlow : slowSource
+
+float atrFilterVal = nz(ta.atr(14))
+bool  atrFilter    = useAtrFilter ? (atrFilterVal > ta.sma(atrFilterVal, atrFilterLen)) : true
+
+bool baseLongCond  = false
+bool baseShortCond = false
+
+if isPredef or isExtCross
+    baseLongCond  := ta.crossover(activeFast, activeSlow)
+    baseShortCond := ta.crossunder(activeFast, activeSlow)
+else if isExtSig
+    switch signalLogic
+        "Not NA (Plotshape/Markers)" =>
+            baseLongCond  := not na(extLongSignal) and na(extLongSignal[1])
+            baseShortCond := not na(extShortSignal) and na(extShortSignal[1])
+        "Crosses Over 0" =>
+            baseLongCond  := ta.crossover(extLongSignal, 0)
+            baseShortCond := ta.crossover(extShortSignal, 0)
+        "Crosses Under 0" =>
+            baseLongCond  := ta.crossunder(extLongSignal, 0)
+            baseShortCond := ta.crossunder(extShortSignal, 0)
+        "Value Changes" =>
+            baseLongCond  := ta.change(extLongSignal) != 0
+            baseShortCond := ta.change(extShortSignal) != 0
+        "Greater Than 0" =>
+            baseLongCond  := extLongSignal > 0
+            baseShortCond := extShortSignal > 0
+        "Less Than 0" =>
+            baseLongCond  := extLongSignal < 0
+            baseShortCond := extShortSignal < 0
+
+longCond        = baseLongCond and atrFilter
+shortCond       = baseShortCond and atrFilter
+
+canLong         = tradeDirection == "Both" or tradeDirection == "Long Only"
+canShort        = tradeDirection == "Both" or tradeDirection == "Short Only"
+
+float atrVal    = nz(ta.atr(atrLen))
+float multi     = distType == "ATR" ? atrVal : distType == "Ticks" ? syminfo.mintick : 1.0
+
+float d_tp1     = tp1Val * multi
+float d_tp2     = tp2Val * multi
+float d_tp3     = tp3Val * multi
+float d_sl1     = sl1Val * multi
+float d_sl2     = sl2Val * multi
+float d_sl3     = sl3Val * multi
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Simulation Execution
+//---------------------------------------------------------------------------------------------------------------------{
+float spreadTicks = 0.0
+float commPerc = 0.0
+
+if useCosts
+    switch costProfile
+        "Forex (Avg)" =>
+            spreadTicks := 1.0
+            commPerc := 0.005
+        "Crypto (Tier 1)" =>
+            spreadTicks := 1.0
+            commPerc := 0.12
+        "Stocks (US)" =>
+            spreadTicks := 2.0
+            commPerc := 0.0
+        "Manual" =>
+            spreadTicks := manualSpread
+            commPerc := manualComm
+
+// State
+var bool  isActive = false
+var int   tradeDir = 0
+var float entryPx = 0.0
+var int   entryTime = 0
+var float qtyLeft = 0.0
+var float tradePnl = 0.0
+
+var bool  active_tp1 = false, var float px_tp1 = 0.0, var bool hit_tp1 = false, var line ln_tp1 = na, var label lb_tp1 = na
+var bool  active_tp2 = false, var float px_tp2 = 0.0, var bool hit_tp2 = false, var line ln_tp2 = na, var label lb_tp2 = na
+var bool  active_tp3 = false, var float px_tp3 = 0.0, var bool hit_tp3 = false, var line ln_tp3 = na, var label lb_tp3 = na
+
+var bool  active_sl1 = false, var float px_sl1 = 0.0, var bool hit_sl1 = false, var line ln_sl1 = na, var label lb_sl1 = na
+var bool  active_sl2 = false, var float px_sl2 = 0.0, var bool hit_sl2 = false, var line ln_sl2 = na, var label lb_sl2 = na
+var bool  active_sl3 = false, var float px_sl3 = 0.0, var bool hit_sl3 = false, var line ln_sl3 = na, var label lb_sl3 = na
+
+// Metrics
+var float[] hourlyPnL = array.new_float(24, 0.0)
+var int[] activeYears = array.new<int>()
+var int[] activeWeeks = array.new<int>()
+var map<int, float> monthlyMap = map.new<int, float>()
+var map<int, float> dailyMap = map.new<int, float>()
+
+var float[] allTradePnL = array.new_float()
+var float[] equityCurve = array.new_float()
+
+var int totalTrades = 0
+var int wins = 0
+var int losses = 0
+var float grossWin = 0.0
+var float grossLoss = 0.0
+
+var float maxEq = 0.0
+var float currentEq = 0.0
+var float maxDd = 0.0
+var int lastHighTime = time
+var int maxStagMs = 0
+
+// TP Hits
+var int tp1HitsCount = 0
+var int tp2HitsCount = 0
+var int tp3HitsCount = 0
+
+bool isLongEntry = false
+bool isShortEntry = false
+bool isLongWin = false
+bool isLongLoss = false
+bool isShortWin = false
+bool isShortLoss = false
+
+// Extend lines visually until hit or new signal
+if active_tp1 and not hit_tp1
+    ln_tp1.set_x2(bar_index), lb_tp1.set_x(bar_index)
+if active_tp2 and not hit_tp2
+    ln_tp2.set_x2(bar_index), lb_tp2.set_x(bar_index)
+if active_tp3 and not hit_tp3
+    ln_tp3.set_x2(bar_index), lb_tp3.set_x(bar_index)
+    
+if active_sl1 and not hit_sl1
+    ln_sl1.set_x2(bar_index), lb_sl1.set_x(bar_index)
+if active_sl2 and not hit_sl2
+    ln_sl2.set_x2(bar_index), lb_sl2.set_x(bar_index)
+if active_sl3 and not hit_sl3
+    ln_sl3.set_x2(bar_index), lb_sl3.set_x(bar_index)
+
+// Process Active Trade Exits
+if isActive
+    float h = high
+    float l = low
+    bool closedThisBar = false
+
+    // 1. Evaluate SLs first (Conservative)
+    if active_sl1 and not hit_sl1 and ((tradeDir == 1 and l <= px_sl1) or (tradeDir == -1 and h >= px_sl1))
+        hit_sl1 := true
+        lb_sl1.set_text("SL 1 ✗")
+    if active_sl2 and not hit_sl2 and ((tradeDir == 1 and l <= px_sl2) or (tradeDir == -1 and h >= px_sl2))
+        hit_sl2 := true
+        lb_sl2.set_text("SL 2 ✗")
+    if active_sl3 and not hit_sl3 and ((tradeDir == 1 and l <= px_sl3) or (tradeDir == -1 and h >= px_sl3))
+        hit_sl3 := true
+        lb_sl3.set_text("SL 3 ✗")
+        
+    if hit_sl1 or hit_sl2 or hit_sl3
+        float exitPx = hit_sl1 ? px_sl1 : hit_sl2 ? px_sl2 : px_sl3
+        float rawPnl = ((exitPx - entryPx) * tradeDir / syminfo.mintick) * qtyLeft
+        float costTicks = (spreadTicks + (entryPx * (commPerc / 100) / syminfo.mintick)) * qtyLeft
+        tradePnl += rawPnl - costTicks
+        qtyLeft := 0.0
+        closedThisBar := true
+        
+    // 2. Evaluate TPs (Partial Exits)
+    if not closedThisBar
+        float tpQty = 1.0 / math.max(1, (active_tp1?1:0) + (active_tp2?1:0) + (active_tp3?1:0))
+        
+        if active_tp1 and not hit_tp1 and ((tradeDir == 1 and h >= px_tp1) or (tradeDir == -1 and l <= px_tp1))
+            hit_tp1 := true
+            tp1HitsCount += 1
+            float rawPnl = ((px_tp1 - entryPx) * tradeDir / syminfo.mintick) * tpQty
+            float costTicks = (spreadTicks + (entryPx * (commPerc / 100) / syminfo.mintick)) * tpQty
+            tradePnl += rawPnl - costTicks
+            qtyLeft -= tpQty
+            lb_tp1.set_text("TP 1 ✓")
+            
+        if active_tp2 and not hit_tp2 and ((tradeDir == 1 and h >= px_tp2) or (tradeDir == -1 and l <= px_tp2))
+            hit_tp2 := true
+            tp2HitsCount += 1
+            float rawPnl = ((px_tp2 - entryPx) * tradeDir / syminfo.mintick) * tpQty
+            float costTicks = (spreadTicks + (entryPx * (commPerc / 100) / syminfo.mintick)) * tpQty
+            tradePnl += rawPnl - costTicks
+            qtyLeft -= tpQty
+            lb_tp2.set_text("TP 2 ✓")
+            
+        if active_tp3 and not hit_tp3 and ((tradeDir == 1 and h >= px_tp3) or (tradeDir == -1 and l <= px_tp3))
+            hit_tp3 := true
+            tp3HitsCount += 1
+            float rawPnl = ((px_tp3 - entryPx) * tradeDir / syminfo.mintick) * tpQty
+            float costTicks = (spreadTicks + (entryPx * (commPerc / 100) / syminfo.mintick)) * tpQty
+            tradePnl += rawPnl - costTicks
+            qtyLeft -= tpQty
+            lb_tp3.set_text("TP 3 ✓")
+            
+        if qtyLeft <= 0.001
+            closedThisBar := true
+            
+    // 3. Evaluate Opposite Signal Reversal
+    if not closedThisBar
+        if (tradeDir == 1 and shortCond) or (tradeDir == -1 and longCond)
+            float rawPnl = ((close - entryPx) * tradeDir / syminfo.mintick) * qtyLeft
+            float costTicks = (spreadTicks + (entryPx * (commPerc / 100) / syminfo.mintick)) * qtyLeft
+            tradePnl += rawPnl - costTicks
+            qtyLeft := 0.0
+            closedThisBar := true
+
+    // Close process
+    if closedThisBar
+        isActive := false
+        totalTrades += 1
+        
+        array.push(allTradePnL, tradePnl)
+        
+        if tradePnl > 0
+            wins += 1
+            grossWin += tradePnl
+            if tradeDir == 1
+                isLongWin := true
+            else
+                isShortWin := true
+        else if tradePnl < 0
+            losses += 1
+            grossLoss += math.abs(tradePnl)
+            if tradeDir == 1
+                isLongLoss := true
+            else
+                isShortLoss := true
+                
+        currentEq += tradePnl
+        array.push(equityCurve, currentEq)
+        
+        if currentEq > maxEq
+            maxEq := currentEq
+            lastHighTime := time
+        
+        int stag = time - lastHighTime
+        if stag > maxStagMs
+            maxStagMs := stag
+            
+        float dd = maxEq - currentEq
+        if dd > maxDd
+            maxDd := dd
+            
+        int hr = hour(entryTime)
+        array.set(hourlyPnL, hr, array.get(hourlyPnL, hr) + tradePnl)
+        
+        int y = year(entryTime)
+        int m = month(entryTime) - 1
+        int y_m = y * 100 + m
+        if array.indexof(activeYears, y) == -1
+            array.push(activeYears, y)
+        monthlyMap.put(y_m, nz(monthlyMap.get(y_m)) + tradePnl)
+        
+        int w = weekofyear(entryTime)
+        int d = dayofweek(entryTime) - 1
+        int y_w = y * 100 + w
+        int y_w_d = y_w * 100 + d
+        if array.indexof(activeWeeks, y_w) == -1
+            array.push(activeWeeks, y_w)
+        dailyMap.put(y_w_d, nz(dailyMap.get(y_w_d)) + tradePnl)
+
+// Orphaned line evaluation (when trade is no longer active but lines are drawn)
+if not isActive
+    float h = high
+    float l = low
+    if active_tp1 and not hit_tp1 and ((tradeDir == 1 and h >= px_tp1) or (tradeDir == -1 and l <= px_tp1))
+        hit_tp1 := true
+        lb_tp1.set_text("TP 1 ✓")
+    if active_tp2 and not hit_tp2 and ((tradeDir == 1 and h >= px_tp2) or (tradeDir == -1 and l <= px_tp2))
+        hit_tp2 := true
+        lb_tp2.set_text("TP 2 ✓")
+    if active_tp3 and not hit_tp3 and ((tradeDir == 1 and h >= px_tp3) or (tradeDir == -1 and l <= px_tp3))
+        hit_tp3 := true
+        lb_tp3.set_text("TP 3 ✓")
+        
+    if active_sl1 and not hit_sl1 and ((tradeDir == 1 and l <= px_sl1) or (tradeDir == -1 and h >= px_sl1))
+        hit_sl1 := true
+        lb_sl1.set_text("SL 1 ✗")
+    if active_sl2 and not hit_sl2 and ((tradeDir == 1 and l <= px_sl2) or (tradeDir == -1 and h >= px_sl2))
+        hit_sl2 := true
+        lb_sl2.set_text("SL 2 ✗")
+    if active_sl3 and not hit_sl3 and ((tradeDir == 1 and l <= px_sl3) or (tradeDir == -1 and h >= px_sl3))
+        hit_sl3 := true
+        lb_sl3.set_text("SL 3 ✗")
+
+// Evaluate Stagnation if no new high
+int currentStag = time - lastHighTime
+if currentStag > maxStagMs
+    maxStagMs := currentStag
+
+// Look for new entries
+if not isActive
+    int newDir = 0
+    if longCond and canLong
+        newDir := 1
+    else if shortCond and canShort
+        newDir := -1
+        
+    if newDir != 0
+        isActive := true
+        tradeDir := newDir
+        entryPx := close
+        entryTime := time
+        qtyLeft := 1.0
+        tradePnl := 0.0
+        
+        if newDir == 1
+            isLongEntry := true
+        else
+            isShortEntry := true
+            
+        float tr = math.max(1, totalTrades)
+        float rate1 = (tp1HitsCount / tr)
+        float rate2 = (tp2HitsCount / tr)
+        float rate3 = (tp3HitsCount / tr)
+        
+        float slDist = math.max(syminfo.mintick, d_sl1)
+        float v1 = switch suggestMetric
+            "Expected Profit" => rate1 * d_tp1
+            "Total Profit" => tp1HitsCount * d_tp1
+            "Risk/Reward" => d_tp1 / slDist
+            => rate1 * 100
+        float v2 = switch suggestMetric
+            "Expected Profit" => rate2 * d_tp2
+            "Total Profit" => tp2HitsCount * d_tp2
+            "Risk/Reward" => d_tp2 / slDist
+            => rate2 * 100
+        float v3 = switch suggestMetric
+            "Expected Profit" => rate3 * d_tp3
+            "Total Profit" => tp3HitsCount * d_tp3
+            "Risk/Reward" => d_tp3 / slDist
+            => rate3 * 100
+        
+        float bestV = v1
+        int bestTp = 1
+        float bestRate = rate1 * 100
+        
+        if v2 > bestV and useTp2
+            bestV := v2
+            bestTp := 2
+            bestRate := rate2 * 100
+        if v3 > bestV and useTp3
+            bestV := v3
+            bestTp := 3
+            bestRate := rate3 * 100
+            
+        string lblText = "TP" + str.tostring(bestTp) + " " + str.tostring(bestRate, "#.#") + "%"
+        float offset = atrVal != 0 ? atrVal : (high - low)
+        
+        if newDir == 1
+            float y1 = low
+            float y2 = low - offset * 1.5
+            line.new(bar_index, y1, bar_index, y2, color = #089981, style = line.style_dashed)
+            label.new(bar_index, y2, "", color = color.new(#089981, 80), style = label.style_circle, size = size.huge)
+            label.new(bar_index, y2, lblText, color = #363a45, textcolor = color.white, style = label.style_label_center, size = size.small)
+        else
+            float y1 = high
+            float y2 = high + offset * 1.5
+            line.new(bar_index, y1, bar_index, y2, color = #f23645, style = line.style_dashed)
+            label.new(bar_index, y2, "", color = color.new(#f23645, 80), style = label.style_circle, size = size.huge)
+            label.new(bar_index, y2, lblText, color = #363a45, textcolor = color.white, style = label.style_label_center, size = size.small)
+            
+        active_tp1 := useTp1, px_tp1 := close + newDir * d_tp1, hit_tp1 := false
+        active_tp2 := useTp2, px_tp2 := close + newDir * d_tp2, hit_tp2 := false
+        active_tp3 := useTp3, px_tp3 := close + newDir * d_tp3, hit_tp3 := false
+        
+        active_sl1 := useSl1, px_sl1 := close - newDir * d_sl1, hit_sl1 := false
+        active_sl2 := useSl2, px_sl2 := close - newDir * d_sl2, hit_sl2 := false
+        active_sl3 := useSl3, px_sl3 := close - newDir * d_sl3, hit_sl3 := false
+        
+        if active_tp1
+            ln_tp1 := line.new(bar_index, px_tp1, bar_index, px_tp1, color=#089981, style=line.style_dashed)
+            lb_tp1 := label.new(bar_index, px_tp1, "TP 1", textcolor=#089981, color=#00000000, size=size.tiny, style=label.style_label_left)
+        if active_tp2
+            ln_tp2 := line.new(bar_index, px_tp2, bar_index, px_tp2, color=#089981, style=line.style_dashed)
+            lb_tp2 := label.new(bar_index, px_tp2, "TP 2", textcolor=#089981, color=#00000000, size=size.tiny, style=label.style_label_left)
+        if active_tp3
+            ln_tp3 := line.new(bar_index, px_tp3, bar_index, px_tp3, color=#089981, style=line.style_dashed)
+            lb_tp3 := label.new(bar_index, px_tp3, "TP 3", textcolor=#089981, color=#00000000, size=size.tiny, style=label.style_label_left)
+            
+        if active_sl1
+            ln_sl1 := line.new(bar_index, px_sl1, bar_index, px_sl1, color=#f23645, style=line.style_dashed)
+            lb_sl1 := label.new(bar_index, px_sl1, "SL 1", textcolor=#f23645, color=#00000000, size=size.tiny, style=label.style_label_left)
+        if active_sl2
+            ln_sl2 := line.new(bar_index, px_sl2, bar_index, px_sl2, color=#f23645, style=line.style_dashed)
+            lb_sl2 := label.new(bar_index, px_sl2, "SL 2", textcolor=#f23645, color=#00000000, size=size.tiny, style=label.style_label_left)
+        if active_sl3
+            ln_sl3 := line.new(bar_index, px_sl3, bar_index, px_sl3, color=#f23645, style=line.style_dashed)
+            lb_sl3 := label.new(bar_index, px_sl3, "SL 3", textcolor=#f23645, color=#00000000, size=size.tiny, style=label.style_label_left)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Visuals (Shapes)
+//---------------------------------------------------------------------------------------------------------------------{
+rColor(int idx) =>
+    bool isBull = activeFast > activeSlow
+    color baseC = isBull ? #089981 : #f23645
+    color.new(baseC, idx * 8)
+
+float cDist = activeFast - activeSlow
+float maxDist = nz(ta.sma(math.abs(cDist), 100)) * 2
+color candleColor = color.from_gradient(cDist, -maxDist, maxDist, #f23645, #089981)
+barcolor(useCandleColor ? candleColor : na, title = "Gradient Candles")
+
+plot(isPredef ? builtInFast : activeFast, "Fast Source", color = isPredef ? rColor(0) : #2962ff)
+plot(isPredef ? r1 : na, "Ribbon 1", color = rColor(1))
+plot(isPredef ? r2 : na, "Ribbon 2", color = rColor(2))
+plot(isPredef ? r3 : na, "Ribbon 3", color = rColor(3))
+plot(isPredef ? r4 : na, "Ribbon 4", color = rColor(4))
+plot(isPredef ? r5 : na, "Ribbon 5", color = rColor(5))
+plot(isPredef ? r6 : na, "Ribbon 6", color = rColor(6))
+plot(isPredef ? r7 : na, "Ribbon 7", color = rColor(7))
+plot(isPredef ? r8 : na, "Ribbon 8", color = rColor(8))
+plot(isPredef ? r9 : na, "Ribbon 9", color = rColor(9))
+plot(isPredef ? builtInSlow : activeSlow, "Slow Source", color = isPredef ? rColor(10) : #ff6d00)
+
+
+
+plotshape(isLongWin, title = "Long Win", style = shape.xcross, location = location.abovebar, color = #089981, size = size.tiny)
+plotshape(isLongLoss, title = "Long Loss", style = shape.xcross, location = location.abovebar, color = #f23645, size = size.tiny)
+
+plotshape(isShortWin, title = "Short Win", style = shape.xcross, location = location.belowbar, color = #089981, size = size.tiny)
+plotshape(isShortLoss, title = "Short Loss", style = shape.xcross, location = location.belowbar, color = #f23645, size = size.tiny)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Advanced Dashboard
+//---------------------------------------------------------------------------------------------------------------------{
+DATA                    = #DBDBDB
+HEADERS                 = #808080
+BACKGROUND              = #161616
+BORDERS                 = #2E2E2E
+
+var parsedDashPos = switch dashPos
+    "Top Right" => position.top_right
+    "Bottom Right" => position.bottom_right
+    "Bottom Left" => position.bottom_left
+
+var parsedDashSize = switch dashSize
+    "Tiny" => size.tiny
+    "Small" => size.small
+    "Normal" => size.normal
+    "Large" => size.large
+
+var table dash = table.new(parsedDashPos, 24, 30, bgcolor = BACKGROUND, border_width = 1, border_color = BACKGROUND, frame_color = BORDERS, frame_width = 1)
+
+if barstate.islast and showDash
+    // Sort keys for chronological display
+    array.sort(activeYears, order.ascending)
+    array.sort(activeWeeks, order.ascending)
+
+    // Calcs
+    float winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0
+    float pf = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 99.9 : 0
+    float avgWin = wins > 0 ? grossWin / wins : 0
+    float avgLoss = losses > 0 ? grossLoss / losses : 0
+    float netProfit = grossWin - grossLoss
+    float recoveryFactor = maxDd > 0 ? netProfit / maxDd : netProfit > 0 ? 99.9 : 0
+    
+    float meanPnL = array.size(allTradePnL) > 0 ? array.sum(allTradePnL) / array.size(allTradePnL) : 0
+    float devSum = 0.0
+    if array.size(allTradePnL) > 0
+        for p in allTradePnL
+            devSum += math.pow(p - meanPnL, 2)
+    float stdDev = array.size(allTradePnL) > 0 ? math.sqrt(devSum / array.size(allTradePnL)) : 0
+    float sharpe = stdDev > 0 ? meanPnL / stdDev : 0
+    
+    // Eq curve string
+    string eqStr = ""
+    int eqSize = array.size(equityCurve)
+    if eqSize > 0
+        int bins = 24
+        float step = eqSize / bins
+        float minE = array.min(equityCurve)
+        float maxE = array.max(equityCurve)
+        float rangeE = math.max(0.0001, maxE - minE)
+        
+        for i = 0 to bins - 1
+            int idx = math.floor(i * step)
+            if idx >= eqSize
+                idx := eqSize - 1
+            float val = array.get(equityCurve, idx) - minE
+            float r = val / rangeE
+            string char = r < 0.125 ? " " : r < 0.25 ? "▂" : r < 0.375 ? "▃" : r < 0.5 ? "▄" : r < 0.625 ? "▅" : r < 0.75 ? "▆" : r < 0.875 ? "▇" : "█"
+            eqStr += char
+            
+    float tp1Perc = totalTrades > 0 ? (tp1HitsCount / totalTrades) * 100 : 0
+    float tp2Perc = totalTrades > 0 ? (tp2HitsCount / totalTrades) * 100 : 0
+    float tp3Perc = totalTrades > 0 ? (tp3HitsCount / totalTrades) * 100 : 0
+    
+    string tp1Str = str.tostring(tp1HitsCount) + " (" + str.tostring(tp1Perc, "#.#") + "%)"
+    string tp2Str = str.tostring(tp2HitsCount) + " (" + str.tostring(tp2Perc, "#.#") + "%)"
+    string tp3Str = str.tostring(tp3HitsCount) + " (" + str.tostring(tp3Perc, "#.#") + "%)"
+    
+    // Row 0
+    dash.merge_cells(0, 0, 23, 0)
+    dash.cell(0, 0, "Advanced Backtest Analytics", text_color=DATA, text_size=parsedDashSize, text_halign=text.align_center, bgcolor=BORDERS)
+
+    // Row 1 & 2
+    dash.merge_cells(0, 1, 5, 1), dash.cell(0, 1, "Total Trades", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(6, 1, 11, 1), dash.cell(6, 1, "Win Rate", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(12, 1, 17, 1), dash.cell(12, 1, "Profit Factor", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(18, 1, 23, 1), dash.cell(18, 1, "Total PnL (Ticks)", text_color=HEADERS, text_size=parsedDashSize)
+
+    dash.merge_cells(0, 2, 5, 2), dash.cell(0, 2, str.tostring(totalTrades), text_color=DATA, text_size=parsedDashSize)
+    dash.merge_cells(6, 2, 11, 2), dash.cell(6, 2, str.tostring(winRate, "#.#") + "%", text_color=winRate>=50?#089981:#f23645, text_size=parsedDashSize)
+    dash.merge_cells(12, 2, 17, 2), dash.cell(12, 2, str.tostring(pf, "#.##"), text_color=pf>=1?#089981:#f23645, text_size=parsedDashSize)
+    dash.merge_cells(18, 2, 23, 2), dash.cell(18, 2, str.tostring(currentEq, "#.##"), text_color=currentEq>=0?#089981:#f23645, text_size=parsedDashSize)
+
+    // Row 3 & 4
+    dash.merge_cells(0, 3, 7, 3), dash.cell(0, 3, "Sharpe Ratio", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(8, 3, 15, 3), dash.cell(8, 3, "Recovery Factor", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(16, 3, 23, 3), dash.cell(16, 3, "Max Stagnation", text_color=HEADERS, text_size=parsedDashSize)
+
+    dash.merge_cells(0, 4, 7, 4), dash.cell(0, 4, str.tostring(sharpe, "#.##"), text_color=DATA, text_size=parsedDashSize)
+    dash.merge_cells(8, 4, 15, 4), dash.cell(8, 4, str.tostring(recoveryFactor, "#.##"), text_color=DATA, text_size=parsedDashSize)
+    dash.merge_cells(16, 4, 23, 4), dash.cell(16, 4, format_time(maxStagMs), text_color=DATA, text_size=parsedDashSize)
+
+    // Row 5 & 6
+    dash.merge_cells(0, 5, 7, 5), dash.cell(0, 5, "TP 1 Hits", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(8, 5, 15, 5), dash.cell(8, 5, "TP 2 Hits", text_color=HEADERS, text_size=parsedDashSize)
+    dash.merge_cells(16, 5, 23, 5), dash.cell(16, 5, "TP 3 Hits", text_color=HEADERS, text_size=parsedDashSize)
+
+    dash.merge_cells(0, 6, 7, 6), dash.cell(0, 6, tp1Str, text_color=DATA, text_size=parsedDashSize)
+    dash.merge_cells(8, 6, 15, 6), dash.cell(8, 6, tp2Str, text_color=DATA, text_size=parsedDashSize)
+    dash.merge_cells(16, 6, 23, 6), dash.cell(16, 6, tp3Str, text_color=DATA, text_size=parsedDashSize)
+
+    // Eq Curve Row
+    dash.merge_cells(0, 7, 23, 7)
+    dash.cell(0, 7, "Equity Curve  " + eqStr, text_color=#089981, text_size=parsedDashSize, text_halign=text.align_left)
+
+    // Row 8 Divider
+    dash.merge_cells(0, 8, 23, 8)
+    dash.cell(0, 8, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", text_color=BORDERS, text_size=parsedDashSize, height=0.5)
+
+    // Row 9, 10, 11 (Histogram)
+    dash.merge_cells(0, 9, 23, 9)
+    dash.cell(0, 9, "Performance by Hour of Day", text_color=HEADERS, text_size=parsedDashSize)
+
+    float maxH = array.max(hourlyPnL)
+    float minH = array.min(hourlyPnL)
+    float absMaxH = math.max(math.abs(maxH), math.abs(minH))
+    
+    for i = 0 to 23
+        float val = array.get(hourlyPnL, i)
+        dash.cell(i, 10, get_block_char(val, absMaxH), text_color = val >= 0 ? #089981 : #f23645, text_size=parsedDashSize)
+        dash.cell(i, 11, str.tostring(i), text_color = HEADERS, text_size = size.tiny)
+
+    // Row 12 Divider
+    dash.merge_cells(0, 12, 23, 12)
+    dash.cell(0, 12, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", text_color=BORDERS, text_size=parsedDashSize, height=0.5)
+
+    // Row 13 Heatmap Header
+    dash.merge_cells(0, 13, 23, 13)
+    dash.cell(0, 13, "Performance by " + heatmapPeriod, text_color=HEADERS, text_size=parsedDashSize)
+
+    int startRow = 14
+
+    if heatmapPeriod == "Months"
+        float[] allMonths = monthlyMap.values()
+        float maxM = array.size(allMonths) > 0 ? array.max(allMonths) : 0.0
+        float minM = array.size(allMonths) > 0 ? array.min(allMonths) : 0.0
+        
+        // Month headers
+        dash.merge_cells(4, startRow, 5, startRow)
+        dash.cell(4, startRow, "Year", text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        for i = 0 to 11
+            dash.cell(6 + i, startRow, get_month_name(i), text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        dash.merge_cells(18, startRow, 19, startRow)
+        dash.cell(18, startRow, "Total", text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        
+        startRow += 1
+        
+        int nYears = array.size(activeYears)
+        int drawYears = math.min(nYears, 10)
+        
+        if drawYears > 0
+            for i = 0 to drawYears - 1
+                int rOffset = startRow + i
+                int y = array.get(activeYears, nYears - drawYears + i)
+                
+                dash.merge_cells(4, rOffset, 5, rOffset)
+                dash.cell(4, rOffset, str.tostring(y), text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+                
+                float rowTotal = 0.0
+                for m = 0 to 11
+                    int y_m = y * 100 + m
+                    float val = nz(monthlyMap.get(y_m))
+                    rowTotal += val
+                    color c = val == 0 ? BACKGROUND : get_heatmap_color(val, maxM, minM)
+                    dash.cell(6 + m, rOffset, val == 0 ? "-" : str.tostring(val, "#.#"), bgcolor=c, text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+                
+                color cTot = rowTotal == 0 ? BACKGROUND : get_heatmap_color(rowTotal, maxM * 3, minM * 3)
+                dash.merge_cells(18, rOffset, 19, rOffset)
+                dash.cell(18, rOffset, str.tostring(rowTotal, "#.#"), bgcolor=cTot, text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+                
+    else
+        float[] allDays = dailyMap.values()
+        float maxD = array.size(allDays) > 0 ? array.max(allDays) : 0.0
+        float minD = array.size(allDays) > 0 ? array.min(allDays) : 0.0
+        
+        // Week headers
+        dash.merge_cells(3, startRow, 5, startRow)
+        dash.cell(3, startRow, "Week", text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        for i = 0 to 6
+            int c = 6 + i * 2
+            dash.merge_cells(c, startRow, c+1, startRow)
+            dash.cell(c, startRow, get_day_name(i), text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        dash.merge_cells(20, startRow, 22, startRow)
+        dash.cell(20, startRow, "Total", text_color=HEADERS, text_size=size.tiny, text_halign=text.align_center)
+        
+        startRow += 1
+        
+        int nWeeks = array.size(activeWeeks)
+        int drawWeeks = math.min(nWeeks, 10)
+        
+        if drawWeeks > 0
+            for i = 0 to drawWeeks - 1
+                int rOffset = startRow + i
+                int y_w = array.get(activeWeeks, nWeeks - drawWeeks + i)
+                int y = math.floor(y_w / 100)
+                int w = y_w % 100
+                
+                dash.merge_cells(3, rOffset, 5, rOffset)
+                dash.cell(3, rOffset, str.tostring(y) + "-W" + str.tostring(w), text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+                
+                float rowTotal = 0.0
+                for d = 0 to 6
+                    int y_w_d = y_w * 100 + d
+                    float val = nz(dailyMap.get(y_w_d))
+                    rowTotal += val
+                    color c = val == 0 ? BACKGROUND : get_heatmap_color(val, maxD, minD)
+                    int col = 6 + d * 2
+                    dash.merge_cells(col, rOffset, col+1, rOffset)
+                    dash.cell(col, rOffset, val == 0 ? "-" : str.tostring(val, "#.#"), bgcolor=c, text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+                
+                color cTot = rowTotal == 0 ? BACKGROUND : get_heatmap_color(rowTotal, maxD * 3, minD * 3)
+                dash.merge_cells(20, rOffset, 22, rOffset)
+                dash.cell(20, rOffset, str.tostring(rowTotal, "#.#"), bgcolor=cTot, text_color=DATA, text_size=size.tiny, text_halign=text.align_center)
+
+//---------------------------------------------------------------------------------------------------------------------}

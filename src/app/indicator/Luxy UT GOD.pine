@@ -1,0 +1,2590 @@
+//@version=6
+  
+indicator("Luxy UT GOD - UT-BOT Forecast", shorttitle="Luxy UT God Mode", overlay=true, max_bars_back=5000, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+ 
+// ================================================================================
+// ATTRIBUTION & CREDITS
+// ================================================================================
+// This indicator implements proven trading concepts using entirely original code.
+//
+// CONCEPTUAL INSPIRATIONS (Reimplemented from scratch):
+// ------------------------------------------------------------
+// • UT Bot ATR Trailing Logic
+//   Original concept by @QuantNomad
+//   Our implementation adds: volume weighting, momentum adjustment, composite SL,
+//   multi-filter system (swing, %, 2-bar).
+//
+// LICENSE: Open Source - Feel free to learn from and improve upon this code
+// Please maintain attribution when reusing components
+
+//======================================================
+//======================== GROUPS ======================
+//======================================================
+
+GROUP_UT      = "================== UT Bot Settings =================="
+GROUP_L1      = "🛡️ Anti-Whipsaw (Regime) ___________________________"
+GROUP_FILTERS = "🎯 Signal Filters __________________________________"
+GROUP_SL      = "💵 Stoploss and Take Profit_________________________"
+GROUP_L2      = "🔄 Adaptive Parameters _____________________________"
+GROUP_L3      = "📈 MTF Confirmation ________________________________"
+GROUP_CALC    = "🔢 Risk Calculator _________________________________"
+GROUP_PRED    = "🔮 Trend Prediction ________________________________"
+
+//======================================================
+//===================== CONSTANTS ======================
+//======================================================
+
+// TP R:R Constants
+const float TP1   = 1.0
+const float TP1_5 = 1.5
+const float TP2   = 2.0
+const float TP3   = 3.0
+
+// Asset Types
+const string ASSET_AUTO    = "Auto-Detect"
+const string ASSET_STOCK   = "Stock"
+const string ASSET_CRYPTO  = "Crypto"
+const string ASSET_FOREX   = "Forex"
+const string ASSET_FUTURES = "Futures"
+const string ASSET_INDEX   = "Index"
+const string ASSET_FUND    = "Fund/ETF"
+const string ASSET_CFD     = "CFD"
+const string ASSET_BOND    = "Bond"
+
+// Adaptive Modes
+const string ADAPT_FIXED      = "Fixed"
+const string ADAPT_DYNAMIC    = "Dynamic"
+const string ADAPT_AGGRESSIVE = "Aggressive"
+
+// MTF Timeframes
+const string MTF_AUTO   = "Auto (×4)"
+const string MTF_5M     = "5m"
+const string MTF_15M    = "15m"
+const string MTF_30M    = "30m"
+const string MTF_1H     = "1H"
+const string MTF_4H     = "4H"
+const string MTF_D      = "D"
+const string MTF_W      = "W"
+
+//======================================================
+//======================== INPUTS ======================
+//======================================================
+
+// UT Bot - Display Options
+utShowLabels = input.bool(true,  "Buy/Sell Labels", group=GROUP_UT, inline="ut2")
+labelSizeStr = input.string("Small", "| Size", options=["Tiny", "Small", "Normal", "Large"], group=GROUP_UT, inline="ut2", tooltip = "Size of all labels on chart\n• Tiny: Minimal\n• Small: Default ⭐\n• Normal: Medium\n• Large: Easy to see")
+utShowLine   = input.bool(false, "UT Line",         group=GROUP_UT, inline="ut3")
+utShowRibbon = input.bool(false, "Ribbon Fill",     group=GROUP_UT, inline="ut3", tooltip = "Buy/Sell Labels: Show BUY/SELL signals on chart\nUT Line: Plot the ATR trailing stop line\nColor Bars: Aqua=bullish, Orange=bearish\nRibbon Fill: Gradient fill between price and UT line")
+utColorBars  = input.bool(false, "Color Bars",      group=GROUP_UT, inline="ut3")
+ 
+// Status Table
+i_showTable     = input.bool(true, "Show Table", group=GROUP_UT, inline="tb1")
+i_tablePos      = input.string("Top Right", "Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group=GROUP_UT, inline="tb1")
+i_tableSize     = input.string("Normal", "Size", options=["Tiny", "Small", "Normal", "Large"], group=GROUP_UT, inline="tb1", tooltip = "Table text size\n• Tiny: Minimal footprint\n• Small: Balanced ⭐\n• Normal: Easy to read")
+
+// UT Bot - Core Settings
+// 1-click preset: auto-tunes Sensitivity + ATR + Chop strength for the chosen style.
+// "Auto" picks the style from the chart's timeframe. "Custom" = use the manual values below.
+i_preset     = input.string("Auto (from TF)", "Trading Style", options=["Auto (from TF)", "Scalping", "Day Trading", "Swing", "Position", "Custom (manual)"], group=GROUP_UT, tooltip = "One-click optimization. Auto-tunes Sensitivity, ATR period and the Smart Chop strength for your style.\n\n• Auto (from TF): matches the chart timeframe ⭐\n  1-5m→Scalping, 15m-1h→Day, 2h-D→Swing, W+→Position\n• Scalping: Key 1.0 / ATR 7 (fast, more signals)\n• Day Trading: Key 1.5 / ATR 10\n• Swing: Key 2.0 / ATR 14\n• Position: Key 2.5 / ATR 20 (slow, fewest signals)\n• Custom: use the manual Sensitivity/ATR below\n\nAny preset except Custom OVERRIDES the manual Sensitivity/ATR values.")
+utKey        = input.float(1.2,  "Sensitivity",  group=GROUP_UT, step=0.1, minval=0.1, inline="ut1")
+utAtrPeriod  = input.int(7,      "/ ATR Period", group=GROUP_UT, minval=1, inline="ut1", tooltip = "SENSITIVITY (Key × ATR):\nMultiplier for trailing stop distance\n• Higher = wider stop, fewer flips\n• Lower = tighter stop, more signals\n\nATR PERIOD:\nLookback for volatility\n\nPRESETS:\n• Scalp (1-5m): Key 0.9-1.2, ATR 5-7\n• Intraday (5-15m): Key 1.3-1.6, ATR 7-10 ⭐\n• Swing (D/W): Key 1.7-2.2, ATR 10-14")
+i_classicUT  = input.bool(false, "Classic UT-Bot Mode", group=GROUP_UT, tooltip = "CLASSIC UT-BOT MODE:\nMakes the trailing stop exactly ATR × Sensitivity (Key) - identical to the original UT Bot by @QuantNomad - by stripping every adaptive layer.\n\n• Uses the manual Sensitivity/ATR above (ignores the Trading Style preset)\n• Disables the asset multiplier, adaptive-volatility, volume weighting and the Smart Chop Filter\n• For a 1:1 match also set Cooldown = 0 and keep all filters OFF\n\nOFF by default - the adaptive 'God Mode' engine is recommended. Use this to compare/validate against the plain UT Bot.")
+
+// Convert label size string to size constant
+labelSize = switch labelSizeStr
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    => size.small
+
+// Layer 1: Anti-Whipsaw (Regime Detection)
+// Smart Chop Filter (Kaufman Efficiency Ratio): the primary anti-whipsaw. Unlike the ADX
+// gate below (which can block the flip bar), this widens the trailing-stop distance in
+// choppy conditions and tightens it in clean trends - so noise stops flipping the signal
+// WITHOUT ever blocking a real reversal. On by default.
+i_smartTrail    = input.bool(true,  "Smart Chop Filter", group=GROUP_L1, inline="L1s")
+i_chopStrength  = input.float(1.0,  "/ Strength", minval=0.0, maxval=3.0, step=0.1, group=GROUP_L1, inline="L1s", tooltip = "SMART CHOP FILTER (Efficiency Ratio):\nAuto-widens the stop in chop (fewer whipsaws) and keeps it tight in trends (timely signals). Does NOT block signals - it adapts the stop distance.\n\nSTRENGTH:\n• 0 = off (raw ratchet)\n• 1.0 = balanced ⭐\n• 2-3 = strong chop suppression (wider stops, fewer signals)")
+i_enableLayer1  = input.bool(false, "Enable Anti-Whipsaw", group=GROUP_L1, inline="L1a", tooltip = "Master switch for the ADX regime filter.\n\nWhen ON: signals filtered by ADX (can suppress the flip bar itself, since ADX is often low right at a reversal - use the Smart Chop Filter above instead for anti-whipsaw)\nWhen OFF: all UT flips become signals (default) ⭐")
+i_adxPeriod     = input.int(14,     "ADX",       minval=5,  maxval=50, group=GROUP_L1, inline="L1b")
+i_adxThreshold  = input.int(15,     "/ Thresh",  minval=10, maxval=40, group=GROUP_L1, inline="L1b", tooltip = "ADX PERIOD: Lookback for calculation\n• 10-14: Responsive ⭐\n• 20+: Smoother\n\nTHRESHOLD: Min ADX for 'trending'\n• < Threshold = Choppy (signals blocked)\n• >= Threshold = Trending (signals allowed)\n• 15 = permissive (default, more signals) ⭐\n• 20-25 = stricter (fewer, cleaner signals)")
+i_cooldownBars  = input.int(3,      "Cooldown",  minval=0,  maxval=20, group=GROUP_L1, inline="L1c")
+i_confirmBars   = input.int(1,      "/ Confirm", minval=1,  maxval=5,  group=GROUP_L1, inline="L1c", tooltip = "COOLDOWN: Min bars between signals\n• 0 = Disabled\n• 2-5 = Typical ⭐\n• Prevents rapid flip-flop\n\nCONFIRM: Bars to confirm direction\n• 1 = Immediate ⭐\n• 2-3 = Conservative")
+
+// Layer 2: Adaptive Parameters
+i_assetType = input.string(ASSET_AUTO, "Asset Type", options=[ASSET_AUTO, ASSET_STOCK, ASSET_CRYPTO, ASSET_FOREX, ASSET_FUTURES, ASSET_INDEX, ASSET_FUND, ASSET_CFD, ASSET_BOND], group=GROUP_L2, inline="L2a")
+i_adaptiveMode = input.string(ADAPT_DYNAMIC, "| Adaptive Mode", options=[ADAPT_FIXED, ADAPT_DYNAMIC, ADAPT_AGGRESSIVE], group=GROUP_L2, inline="L2a", tooltip = "ASSET TYPE:\nAffects sensitivity multipliers for Key Value\n\n• Auto-Detect: Identifies based on symbol ⭐\n• Stock: Standard (1.0×)\n• Crypto: Wider stops (1.5×) - high volatility\n• Forex: Tighter stops (0.8×) - low volatility\n• Futures: Moderate (1.2×)\n• Index: Slightly tighter (0.9×)\n• Fund/ETF: Slightly tighter (0.9×)\n• CFD: Standard (1.0×)\n• Bond: Much tighter (0.5×) - low volatility\n\n" + "ADAPTIVE MODE:\nHow Key Value adjusts to market volatility\n\n• Fixed: Use input values as-is (no auto-adjustment)\n• Dynamic: Auto-adjust based on volatility ⭐\n  - Low vol (< 0.8×): Key × 0.85\n  - Normal (0.8-1.2×): Key × 1.0\n  - High vol (> 1.2×): Key × 1.15\n• Aggressive: Wider adjustments\n  - Low vol: Key × 0.7\n  - High vol: Key × 1.3")
+
+// Signal Filters
+i_useVolatility = input.bool(false, "High Vol Filter", group=GROUP_FILTERS, inline="L1d")
+i_volLookback   = input.int(50,     "/ Lookback", minval=10, maxval=200, group=GROUP_FILTERS, inline="L1d")
+i_volThresh     = input.float(1.2,  "× Avg",   minval=1.0, maxval=3.0, step=0.1, group=GROUP_FILTERS, inline="L1d", tooltip = "HIGH VOLATILITY FILTER:\nDetects when current ATR is above average\n\nLOOKBACK: Bars to calculate average ATR\n• 50: Standard ⭐\n• 100+: Smoother\n\nTHRESHOLD:\n• 1.2×: Slightly elevated ⭐\n• 1.5×: High volatility\n• 2.0×: Extreme volatility\n\nWhen ON: Only allow signals in high volatility")
+utUseSwingFilter= input.bool(false, "Swing Filter", group=GROUP_FILTERS, inline="sf1")
+swingLen        = input.int(8,      "/ Lookback",   group=GROUP_FILTERS, minval=1, inline="sf1", tooltip = "SWING FILTER:\nOnly signals aligned with swing structure\n\nLOOKBACK: Bars to find swing high/low\n• 5-10: Scalp/Day trading ⭐\n• 10-20: Swing trading")
+utUsePctFilter  = input.bool(false, "% Filter", group=GROUP_FILTERS, inline="sf2")
+utPctThr        = input.float(0.05, "/ Min %",  group=GROUP_FILTERS, step=0.05, minval=0, inline="sf2", tooltip = "% CHANGE FILTER:\nRequire minimum bar-to-bar % change\n\nMIN %: Threshold in percent\n• 0.1-0.5%: Intraday\n• 0.3-1.0%: Swing")
+utUseDelay      = input.bool(false, "2-Bar Confirm", group=GROUP_FILTERS, inline="sf3", tooltip = "Require 2 consecutive bars to confirm trend direction\n\n• Reduces false signals\n• Adds slight lag\n• Good for volatile markets")
+i_useVolFilter  = input.bool(false, "Volume Filter", group=GROUP_FILTERS, inline="sf4")
+i_volSmaLen     = input.int(20,     "/ SMA",   minval=5,  maxval=100, group=GROUP_FILTERS, inline="sf4")
+i_volThreshold  = input.float(1.0,  "× Avg",   minval=0.5, maxval=3.0, step=0.1, group=GROUP_FILTERS, inline="sf4", tooltip = "Require volume above average to confirm signals\n\nSMA: Lookback period for average volume\n• 20: Standard ⭐\n\nTHRESHOLD:\n• 0.8×: Relaxed\n• 1.0×: Above average ⭐\n• 1.5×: Strong volume required")
+i_useRsiFilter  = input.bool(false, "RSI Filter",    group=GROUP_FILTERS, inline="sf5")
+i_rsiLen        = input.int(14,     "/ Len",   minval=5,  maxval=50,  group=GROUP_FILTERS, inline="sf5", tooltip = "RSI MOMENTUM FILTER:\nConfirm signals with RSI direction\n\nLEN: RSI period (14 standard ⭐)")
+i_rsiOB         = input.int(70,     "Overbought",      minval=60, maxval=90,  group=GROUP_FILTERS, inline="sf9")
+i_rsiOS         = input.int(30,     "Oversold",      minval=10, maxval=40,  group=GROUP_FILTERS, inline="sf9", tooltip = "Overbought: Block BUY above this\n• 70: Standard ⭐\n• 80: Relaxed\n\nOversold: Block SELL below this\n• 30: Standard ⭐\n• 20: Relaxed")
+i_useHullConfirm = input.bool(false, "Hull MA", group=GROUP_FILTERS, inline="sf6")
+i_hullPeriod     = input.int(20,     "/ Period", minval=5, maxval=100, group=GROUP_FILTERS, inline="sf6", tooltip = "HULL MA CONFIRMATION:\nRequire Hull MA direction alignment\n\nPERIOD: Hull MA lookback\n• 14-20: Responsive ⭐\n• 30-50: Smoother\n\nBUY: Price must be above Hull MA\nSELL: Price must be below Hull MA")
+i_useSuperTrend  = input.bool(false, "SuperTrend", group=GROUP_FILTERS, inline="sf7")
+i_stAtrPeriod    = input.int(10,     "/ ATR",    minval=5, maxval=50, group=GROUP_FILTERS, inline="sf7")
+i_stMult         = input.float(3.0,  "×",        minval=1.0, maxval=5.0, step=0.1, group=GROUP_FILTERS, inline="sf7")
+i_showStLine     = input.bool(false, "Line",     group=GROUP_FILTERS, inline="sf7", tooltip = "SUPERTREND FILTER:\nRequire SuperTrend confirmation\n\nBUY: Only when SuperTrend is bullish\nSELL: Only when SuperTrend is bearish\n\nATR: Period for volatility (10 standard ⭐)\nMULT: Multiplier (3.0 standard ⭐)\nLINE: Show SuperTrend line on chart")
+i_useFullCandle  = input.bool(false, "Full Candle", group=GROUP_FILTERS, inline="sf8", tooltip = "FULL CANDLE CONFIRMATION:\nRequire entire candle above/below UT line\n\n• BUY: Low must be above trailing stop\n• SELL: High must be below trailing stop\n\nPrevents signals on candles 'straddling' the line\nReduces false signals that quickly reverse\n\nOFF by default (more signals). Turn ON for fewer, cleaner entries.")
+utShowZones      = input.bool(true,  "S/R Zones",   group=GROUP_FILTERS, inline="sfz")
+i_useZoneFilter  = input.bool(false, "| Zone Filter", group=GROUP_FILTERS, inline="sfz")
+i_zoneWidthMult  = input.float(0.5,  "/ Width×ATR", group=GROUP_FILTERS, minval=0.1, maxval=2.0, step=0.1, inline="sfz", tooltip = "SUPPORT/RESISTANCE ZONES:\nClusters recent pivot highs/lows into persistent price zones (unlike the rolling Structure line above, these stay fixed until price revisits and breaks them)\n\nS/R ZONES: Show zone boxes on chart\nZONE FILTER: Block BUY inside a resistance zone, SELL inside a support zone\nWIDTH: Zone half-width as ATR multiple\n• 0.3-0.5: Tight zones ⭐\n• 0.8-1.2: Wide zones")
+i_zonePivotLen   = input.int(10,     "/ Pivot Strength", minval=3, maxval=50, group=GROUP_FILTERS, inline="sfz2", tooltip = "S/R PIVOT STRENGTH:\nBars each side required to confirm a swing high/low for zone clustering.\n\n• 5-7: Minor swings (more, weaker zones)\n• 10: Balanced ⭐\n• 15-20: Only major swings (fewer, stronger zones)\n\nHigher than the Divergence pivot on purpose - S/R levels should be more significant than divergence pivots.")
+
+// SL visuals
+entryShow    = input.bool(true, "Show Entry Line", group=GROUP_SL, inline="SHOW")
+linesLimit10 = input.bool(true, "Limit 10 bars",   group=GROUP_SL, inline="SHOW", tooltip = "Limit all lines (SL, TP, Entry) to 10 bars\n• ON: Cleaner chart ⭐\n• OFF: Lines extend until next signal")
+slShow     = input.bool(true,  "Show Stop Loss Line", group=GROUP_SL, inline="sl1")
+i_slMethod = input.string("Smart Adaptive", "| SL Method", options=["ATR", "% Based", "Tick Based", "Swing", "Scaled ATR", "Smart Adaptive", "Safer"], group=GROUP_SL, inline="sl1", tooltip = "Stop Loss calculation method (used when Trading Style = Custom or Classic mode; otherwise the preset auto-sets a style-matched ATR stop - tight for Scalping, wide for Position):\n\n⭐ SMART ADAPTIVE:\n• Auto-adjusts to volatility (can be wide for scalping)\n\nATR:\n• Standard ATR × Multiplier\n\n% BASED / TICK BASED / SWING / SCALED ATR / SAFER: see manual.")
+tpDisplayMode   = input.string("Minimal", "TP Style", options=["Minimal", "Detailed"], group=GROUP_SL, inline="DIS")
+tpFreezeOnTouch = input.bool(true, "Freeze Lines on Hit", group=GROUP_SL, inline="DIS", tooltip = "LINE DISPLAY STYLE:\n\n• Minimal: Clean labels (TP1, TP2, etc.)\n• Detailed: Shows price + % gain on label\n  - Easier for trading execution\n  - Example: 'TP1 $150.25 (+2.5%)'\n\nWhen ON: marks TP with ✅ when price touches it\nUseful for trade journaling and review")
+
+slAtrLen   = input.int(14,     "ATR",  minval=5,  maxval=50, group=GROUP_SL, inline="sl3")
+i_slAtrMult = input.float(1.5, "×",    minval=0.5, maxval=3, step=0.1, group=GROUP_SL, inline="sl3", tooltip = "ATR Period & Multiplier (used with Custom/Classic; presets auto-set the multiplier per style)\n• 7-10 / 1.0×: Day trading\n• 14 / 1.5×: Standard ⭐\n• 20+ / 2.0×: Swing trading")
+slPctStop  = input.float(5.0,  "% Stop",    minval=0.1, maxval=10.0, step=0.1, group=GROUP_SL, inline="sl5", tooltip = "Fixed % distance from entry\n• LONG: SL = Entry × (1 - %)\n• SHORT: SL = Entry × (1 + %)\n\n• 0.5%: Tight (scalping)\n• 1.0%: Balanced ⭐\n• 2.0%: Wide (swing)")
+slTickStop = input.int(50,     "Ticks",     minval=5,  maxval=500, step=5, group=GROUP_SL, inline="sl5", tooltip = "Fixed ticks from entry\n• Tick = minimum price movement\n• 20-50: Tight\n• 50-100: Normal ⭐\n• 100+: Wide")
+slExtraTicks = input.int(0,    "Buffer",    minval=0, group=GROUP_SL, inline="sl6", tooltip = "Extra ticks beyond calculated SL\n• Protects against stop hunts\n• 0 = No buffer\n• 2-5 = Typical")
+
+// TP visuals
+tpShow    = input.bool(true,  "Show TP Lines", group=GROUP_SL, inline="tp1")
+tp1On     = input.bool(true,   "TP×1 (1R) |", group=GROUP_SL, inline="tp2")
+tp15On    = input.bool(false,  "TP×1.5 |", group=GROUP_SL, inline="tp2")
+tp2On     = input.bool(true,   "TP×2 |", group=GROUP_SL, inline="tp2")
+tp3On     = input.bool(false,  "TP×3", group=GROUP_SL, inline="tp2", tooltip = "R = Risk Units (distance from entry to SL)\n\nTP1 (1R): Conservative, 1:1 risk/reward\nTP1.5 (1.5R): Intermediate target\nTP2 (2R): Balanced, 2:1 R:R ⭐\nTP3 (3R): Aggressive, 3:1 R:R\n\nRECOMMENDED:\n• Scalping: TP1 + TP1.5\n• Day Trading: TP1 + TP2 ⭐\n• Swing: TP2 + TP3")
+
+// Layer 3: MTF Confirmation
+i_useMTF      = input.bool(false, "Enable MTF", group=GROUP_L3, inline="L3a", tooltip = "Multi-Timeframe Confirmation\n\nWhen ON: Only allow signals aligned with higher timeframe trend\n• BUY: HTF must be bullish\n• SELL: HTF must be bearish\n\nReduces counter-trend entries")
+i_mtfTimeframe = input.string(MTF_AUTO, "Timeframe", options=[MTF_AUTO, MTF_5M, MTF_15M, MTF_30M, MTF_1H, MTF_4H, MTF_D, MTF_W], group=GROUP_L3, inline="L3a", tooltip = "HIGHER TIMEFRAME:\n\n• Auto (×4): 4× current TF ⭐\n  - 1m → 5m\n  - 5m → 15m\n  - 15m → 1H\n  - 1H → 4H\n  - 4H → D\n  - D → W\n\n• Manual: Select specific timeframe")
+i_statsLookback = input.int(60, "Stats Days", minval=1, maxval=365, group=GROUP_L3, inline="L3b", tooltip = "STATISTICS LOOKBACK:\n\nHow many days back to count trades for Win Rate and Avg Bars.\n\n• 5: Recent performance ⭐\n• 30: Monthly view\n• 90: Quarterly view")
+
+// Divergence Detection
+i_showDivergence = input.bool(false, "Show Divergence", group=GROUP_L3, inline="L3c", tooltip = "DIVERGENCE LABELS:\n\nShows standalone Bull/Bear RSI divergence labels on chart.\n\n• OFF by default - divergence is already merged into the Buy/Sell signal as a '+Div ⭐' marker and into the Confidence Score, so separate labels aren't needed (they confused users who mistook them for entry signals).\n• Turn ON if you want to see every divergence as its own label.")
+i_divRsiLen      = input.int(14, "RSI", minval=5, maxval=50, group=GROUP_L3, inline="L3c")
+i_divLookback    = input.int(5, "/ Pivot", minval=2, maxval=20, group=GROUP_L3, inline="L3c", tooltip = "RSI: Period for RSI calculation (14 standard)\n\nPIVOT: Bars to confirm pivot high/low\n• 3-5: More signals\n• 5-10: Fewer, stronger signals ⭐")
+
+// Risk Calculator
+i_showRisk       = input.bool(true, "Show Risk Calc", group=GROUP_CALC, inline="L3d", tooltip = "RISK CALCULATOR:\n\nCalculates position size based on:\n• Account size\n• Risk percentage OR fixed amount\n• Stop loss distance\n\nShows how many shares/contracts to buy")
+i_riskMode       = input.string("% of Account", "Risk Mode", options=["% of Account", "Fixed Amount"], group=GROUP_CALC, inline="L3d", tooltip = "RISK MODE:\n\n• % of Account: Risk X% of total account\n• Fixed Amount: Risk fixed $ amount per trade\n\nFixed is useful for consistent risk across all trades")
+i_accountSize    = input.float(10000, "Account $", minval=100, step=1000, group=GROUP_CALC, inline="L3e", tooltip = "Your total trading account size in account currency\n\nUsed to calculate:\n• Risk amount per trade (when using %)\n• Position size\n• Max position value")
+i_riskPct        = input.float(1.0, "Risk %", minval=0.1, maxval=10, step=0.1, group=GROUP_CALC, inline="L3e", tooltip = "Percentage of account to risk per trade\n(Only used when Risk Mode = '% of Account')\n\n• 0.5-1%: Conservative ⭐\n• 1-2%: Moderate\n• 2-3%: Aggressive")
+i_riskFixed      = input.float(100, "/ Fixed $", minval=1, step=10, group=GROUP_CALC, inline="L3e", tooltip = "Fixed amount to risk per trade\n(Only used when Risk Mode = 'Fixed Amount')\n\nExamples:\n• $50: Small accounts\n• $100: Medium ⭐\n• $200+: Larger accounts")
+i_accountCurrency = input.string("USD", "Currency", options=["USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF"], group=GROUP_CALC, inline="L3f", tooltip = "Your account currency\n\nAffects position sizing calculations")
+i_useLiveRates   = input.bool(true, "Live Rates", group=GROUP_CALC, inline="L3f")
+i_manualRate     = input.float(1.0, "/ Manual $1=", minval=0.001, maxval=10000, step=0.01, group=GROUP_CALC, inline="L3f", tooltip = "Manual exchange rate (USD to your currency)\n\nExamples:\n• USD to ILS = 3.7\n• USD to EUR = 0.92\n• USD to JPY = 150\n\nUsed when Live Rates is OFF or unavailable")
+
+// Trend Prediction
+i_enablePrediction = input.bool(true, "Enable Prediction", group=GROUP_PRED, inline="pred1", tooltip = "TREND PREDICTION:\n\nPredicts how long the current trend may last based on historical patterns.\n\n• Gradient boxes show expected duration\n• Labels show survival probability %\n• Dashboard shows prediction stats")
+i_predMode         = input.string("Standard", "Mode", options=["Simple", "Standard", "Advanced"], group=GROUP_PRED, inline="pred1", tooltip = "PREDICTION MODE:\n\n• Simple: Uses median duration only\n• Standard: EWA + standard deviation ⭐\n• Advanced: Adds 5 adaptive multipliers:\n  - Structure (S/R proximity)\n  - Stock Type (volatility profile)\n  - Flip Strength (volume + filters)\n  - Error Learning (self-correction)\n  - Regime (trend vs chop)")
+i_predSamples      = input.int(50, "History", minval=10, maxval=100, group=GROUP_PRED, inline="pred2", tooltip = "HISTORY SIZE:\n\nNumber of past trends to analyze\n\n• 10-30: Responsive to recent changes\n• 50: Balanced ⭐\n• 100: Smoother, more stable")
+i_showPredBoxes    = input.bool(true, "Boxes", group=GROUP_PRED, inline="pred2", tooltip = "Show gradient boxes visualizing predicted trend duration\n\n• Fades from solid to transparent\n• Position: Below (bull) or above (bear) UT line")
+i_showPredLabels   = input.bool(true, "Labels", group=GROUP_PRED, inline="pred2", tooltip = "Show probability labels at key points\n\n• Shows survival % at 25%, 50%, 75%, 90%, 100% of prediction\n• Weibull probability distribution")
+
+//======================================================
+//============== VAR DECLARATIONS ======================
+//======================================================
+
+// SL tracking variables
+var line  slLine     = na
+var label slLbl      = na
+var int   slStartBar = na
+var float baseSl     = na
+var float slPrice    = na
+var color slColor    = na
+
+// TP line/label variables
+var line  tp1Line  = na
+var line  tp15Line = na
+var line  tp2Line  = na
+var line  tp3Line  = na
+var label tp1Lbl   = na
+var label tp15Lbl  = na
+var label tp2Lbl   = na
+var label tp3Lbl   = na
+
+// TP price level variables
+var float tp1Y       = na
+var float tp15Y      = na
+var float tp2Y       = na
+var float tp3Y       = na
+var float tpInitRisk = na
+
+// Entry tracking variables
+var line  entryLine = na
+var label entryLbl  = na
+var int   entryBar  = na
+var float entryPx   = na
+var color entryCol  = na
+
+// Statistics tracking (Layer 3)
+var int   statTotalTrades = 0
+var int   statWins        = 0
+var int   statLosses      = 0
+var int   statTotalBars   = 0   // Sum of bars to TP (for avg calculation)
+var int   statWinBars     = 0   // Count of wins with bar data
+var bool  statTradeOpen   = false
+
+// Prediction tracking arrays
+var array<int> pred_bull_durations = array.new<int>()
+var array<int> pred_bear_durations = array.new<int>()
+var array<int> pred_all_durations = array.new<int>()
+var array<bool> pred_all_is_bullish = array.new<bool>()
+
+// Current trend tracking for prediction
+var int pred_current_bars = 0
+var bool pred_is_bullish = true
+
+// Prediction values
+var float pred_avg = na
+var float pred_end = na
+var bool pred_using_fallback = false
+
+// Accuracy tracking (last 10)
+var array<float> pred_last10_predicted = array.new<float>()
+var array<int> pred_last10_actual = array.new<int>()
+var array<bool> pred_last10_bullish = array.new<bool>()
+
+// Multiplier tracking (Advanced mode)
+var array<float> pred_vol_ratios = array.new<float>()
+var array<float> pred_quality_scores = array.new<float>()
+var array<float> pred_error_ratios = array.new<float>()
+
+// Prediction drawing objects
+var array<box> pred_boxes = array.new<box>()
+var array<label> pred_labels = array.new<label>()
+
+// S/R Zone tracking arrays (support = pivot lows, resistance = pivot highs; kept
+// in separate arrays so a resistance zone can never merge into a support zone)
+var array<float> zoneResPrice    = array.new<float>()
+var array<int>   zoneResTouch    = array.new<int>()
+var array<int>   zoneResStartBar = array.new<int>()
+var array<box>   zoneResBoxes    = array.new<box>()
+var array<label> zoneResLabels   = array.new<label>()
+var array<float> zoneSupPrice    = array.new<float>()
+var array<int>   zoneSupTouch    = array.new<int>()
+var array<int>   zoneSupStartBar = array.new<int>()
+var array<box>   zoneSupBoxes    = array.new<box>()
+var array<label> zoneSupLabels   = array.new<label>()
+
+//======================================================
+//============= LAYER 1: ANTI-WHIPSAW ==================
+//======================================================
+
+// 1.1 detectRegime() - ADX-based regime detection
+// Returns: true if market is trending (ADX > threshold), false if choppy
+detectRegime() =>
+    [diplus, diminus, adxValue] = ta.dmi(i_adxPeriod, i_adxPeriod)
+    bool isTrending = adxValue >= i_adxThreshold
+    isTrending
+
+// 1.2 checkCooldown() - Minimum bars between signals
+// Returns: true if cooldown period has passed since last signal
+var int lastSignalBar = na
+var int lastSignalDir = 0  // 1 = BUY, -1 = SELL, 0 = none
+checkCooldown() =>
+    bool cooldownOk = na(lastSignalBar) or (bar_index - lastSignalBar >= i_cooldownBars)
+    cooldownOk
+
+// 1.4 checkVolumeFilter() - Volume confirmation
+// Returns: true if volume is above threshold (or filter is disabled)
+checkVolumeFilter() =>
+    if not i_useVolFilter
+        true
+    else
+        float volSma = ta.sma(volume, i_volSmaLen)
+        volume >= volSma * i_volThreshold
+
+// 1.5 checkRSIFilter() - RSI momentum confirmation
+// Returns: true if RSI confirms direction (or filter is disabled)
+// BUY blocked if RSI > OB (overbought), SELL blocked if RSI < OS (oversold)
+checkRSIFilter(_isBuy) =>
+    if not i_useRsiFilter
+        true
+    else
+        float rsiVal = ta.rsi(close, i_rsiLen)
+        _isBuy ? rsiVal < i_rsiOB : rsiVal > i_rsiOS
+
+// 1.6 Hull Moving Average function
+hullMA(series float src, simple int length) =>
+    ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.round(math.sqrt(length)))
+
+// 1.7 checkHullFilter() - Hull MA direction confirmation
+// Returns: true if price aligns with Hull MA direction (or filter is disabled)
+hullValue = i_useHullConfirm ? hullMA(close, i_hullPeriod) : close
+checkHullFilter(_isBuy) =>
+    if not i_useHullConfirm
+        true
+    else
+        _isBuy ? close > hullValue : close < hullValue
+
+// 1.8 checkVolatilityFilter() - High volatility detection
+// Returns: true if current ATR is above average (or filter is disabled)
+currentATR = ta.atr(14)
+avgATR = ta.sma(currentATR, i_volLookback)
+volatilityRatio = avgATR > 0 ? currentATR / avgATR : 1.0
+isHighVol = volatilityRatio >= i_volThresh
+checkVolatilityFilter() =>
+    if not i_useVolatility
+        true
+    else
+        isHighVol
+
+// 1.9 SuperTrend Calculation
+// Standard SuperTrend indicator for trend confirmation
+stAtr = ta.atr(i_stAtrPeriod)
+float stUp = hl2 - (i_stMult * stAtr)
+float stDn = hl2 + (i_stMult * stAtr)
+
+var float stUpperBand = na
+var float stLowerBand = na
+var int   stDirection = 1  // 1 = bullish, -1 = bearish
+
+// Calculate bands with proper trailing logic
+stUpperBand := na(stUpperBand[1]) ? stUp : (stUp > stUpperBand[1] or close[1] < stUpperBand[1]) ? stUp : stUpperBand[1]
+stLowerBand := na(stLowerBand[1]) ? stDn : (stDn < stLowerBand[1] or close[1] > stLowerBand[1]) ? stDn : stLowerBand[1]
+
+// Determine direction
+stDirection := na(stDirection[1]) ? 1 :
+               stDirection[1] == -1 and close > stLowerBand[1] ? 1 :
+               stDirection[1] == 1 and close < stUpperBand[1] ? -1 :
+               stDirection[1]
+
+// SuperTrend line value
+float stValue = stDirection == 1 ? stUpperBand : stLowerBand
+
+// SuperTrend trend states
+bool stBullish = stDirection == 1
+bool stBearish = stDirection == -1
+
+// SuperTrend Engine: Calculate strength (0-100)
+// Strength = how far price is from SuperTrend line relative to ATR
+float stDistance = math.abs(close - stValue)
+float stStrength = math.min(100, (stDistance / stAtr) * 25)
+
+// Detect SuperTrend flip (for consensus bonus)
+bool stFlipBull = stDirection == 1 and stDirection[1] == -1
+bool stFlipBear = stDirection == -1 and stDirection[1] == 1
+
+// 1.10 checkSuperTrendFilter() - SuperTrend confirmation
+checkSuperTrendFilter(_isBuy) =>
+    if not i_useSuperTrend
+        true
+    else
+        _isBuy ? stBullish : stBearish
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1.11 Structure Break Engine
+// Detects when price breaks beyond recent swing high/low (structure break)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Find recent swing high/low using swingLen from existing Swing Filter
+float sbSwingHigh = ta.highest(high, swingLen)
+float sbSwingLow = ta.lowest(low, swingLen)
+
+// Structure break = price closes beyond swing (not just wicks)
+bool sbBullishBreak = close > sbSwingHigh[1]  // Closed above previous swing high
+bool sbBearishBreak = close < sbSwingLow[1]   // Closed below previous swing low
+
+// Structure Break Engine: Calculate strength (0-100)
+float sbAtr = ta.atr(14)
+float sbMid = (sbSwingHigh[1] + sbSwingLow[1]) / 2
+float sbHalfRange = (sbSwingHigh[1] - sbSwingLow[1]) / 2
+
+// Strength based on position within range OR break distance
+float sbBullDistance = sbBullishBreak ? (close - sbSwingHigh[1]) : 0
+float sbBearDistance = sbBearishBreak ? (sbSwingLow[1] - close) : 0
+float sbBreakStrength = math.min(100, math.max(sbBullDistance, sbBearDistance) / sbAtr * 30)
+float sbPositionStrength = sbHalfRange > 0 ? math.min(100, math.abs(close - sbMid) / sbHalfRange * 100) : 0
+float sbStrength = sbBullishBreak or sbBearishBreak ? sbBreakStrength : sbPositionStrength
+
+// Structure states: based on position relative to midpoint (not just close vs close[1])
+bool sbBullish = close > sbMid  // Above midpoint = bullish structure
+bool sbBearish = close <= sbMid // At or below midpoint = bearish structure
+
+// Layer 1 results (used to gate signals) - Note: checkConfirmation() defined after xATRTrailingStop
+bool l1_regimeOk      = not i_enableLayer1 or detectRegime()
+bool l1_cooldownOk    = i_cooldownBars == 0 or checkCooldown()
+bool l1_volumeOk      = checkVolumeFilter()
+bool l1_volatilityOk  = checkVolatilityFilter()
+
+//======================================================
+//============= LAYER 2: ADAPTIVE PARAMS ===============
+//======================================================
+
+// 2.1 detectAssetType() - Auto-detect or use manual selection
+// Returns: Asset type string (uses syminfo.type for auto-detection)
+detectAssetType() =>
+    if i_assetType != ASSET_AUTO
+        i_assetType
+    else
+        switch syminfo.type
+            "crypto"  => ASSET_CRYPTO
+            "forex"   => ASSET_FOREX
+            "futures" => ASSET_FUTURES
+            "index"   => ASSET_INDEX
+            "fund"    => ASSET_FUND
+            "cfd"     => ASSET_CFD
+            "bond"    => ASSET_BOND
+            => ASSET_STOCK  // stock or unknown → treat as stock
+
+// 2.2 getAssetMultiplier() - Get sensitivity multiplier for asset type
+// Returns: float multiplier for Key Value adjustment
+getAssetMultiplier(string assetType) =>
+    switch assetType
+        ASSET_CRYPTO  => 1.5   // Crypto: wider stops (high volatility)
+        ASSET_FOREX   => 0.8   // Forex: tighter stops (low volatility)
+        ASSET_FUTURES => 1.2   // Futures: moderate
+        ASSET_INDEX   => 0.9   // Index: slightly tighter (diversified, less volatile)
+        ASSET_FUND    => 0.9   // Fund/ETF: slightly tighter (diversified)
+        ASSET_CFD     => 1.0   // CFD: standard (mirrors underlying)
+        ASSET_BOND    => 0.5   // Bond: much tighter (very low volatility)
+        ASSET_STOCK   => 1.0   // Stock: standard
+        => 1.0
+
+// 2.3 getAdaptiveMultiplier() - Adjust Key based on volatility and mode
+// Returns: float multiplier based on current volatility ratio
+getAdaptiveMultiplier(float volRatio) =>
+    if i_adaptiveMode == ADAPT_FIXED
+        1.0
+    else if i_adaptiveMode == ADAPT_DYNAMIC
+        // Dynamic: moderate adjustments
+        if volRatio < 0.8
+            0.85   // Low volatility: tighter stops
+        else if volRatio > 1.2
+            1.15   // High volatility: wider stops
+        else
+            1.0    // Normal volatility
+    else  // ADAPT_AGGRESSIVE
+        // Aggressive: wider adjustments
+        if volRatio < 0.8
+            0.7    // Low volatility: much tighter
+        else if volRatio > 1.2
+            1.3    // High volatility: much wider
+        else
+            1.0    // Normal volatility
+
+// Layer 2 results
+string detectedAsset = detectAssetType()
+float  assetMult     = getAssetMultiplier(detectedAsset)
+float  adaptiveMult  = getAdaptiveMultiplier(volatilityRatio)
+
+//======================================================
+//============= LAYER 3: MTF CONFIRMATION ==============
+//======================================================
+
+// 3.1 getAutoHTF() - Calculate higher timeframe (4× current)
+getAutoHTF() =>
+    string htf = ""
+    if timeframe.isintraday
+        int mins = timeframe.multiplier
+        if timeframe.isseconds
+            mins := 1
+        else if timeframe.isminutes
+            mins := timeframe.multiplier
+
+        int htfMins = mins * 4
+        if htfMins < 60
+            htf := str.tostring(htfMins)
+        else if htfMins < 240
+            htf := str.tostring(htfMins / 60) + "H"
+        else if htfMins < 1440
+            htf := "4H"
+        else
+            htf := "D"
+    else if timeframe.isdaily
+        htf := "W"
+    else if timeframe.isweekly
+        htf := "M"
+    else
+        htf := "D"
+    htf
+
+// 3.2 getSelectedHTF() - Get the selected timeframe string
+getSelectedHTF() =>
+    if i_mtfTimeframe == MTF_AUTO
+        getAutoHTF()
+    else
+        switch i_mtfTimeframe
+            MTF_5M  => "5"
+            MTF_15M => "15"
+            MTF_30M => "30"
+            MTF_1H  => "60"
+            MTF_4H  => "240"
+            MTF_D   => "D"
+            MTF_W   => "W"
+            => "60"
+
+// 3.3 Get current timeframe in minutes (for comparison)
+getCurrentTFMins() =>
+    int mins = 0
+    if timeframe.isseconds
+        mins := 1
+    else if timeframe.isminutes
+        mins := timeframe.multiplier
+    else if timeframe.isdaily
+        mins := 1440
+    else if timeframe.isweekly
+        mins := 10080
+    else if timeframe.ismonthly
+        mins := 43200
+    else
+        mins := timeframe.multiplier
+    mins
+
+int currentTFMins = getCurrentTFMins()
+
+// 3.4 Get ALL HTF trends using EMA 9/21 crossover (tuples = 7 calls instead of 14)
+[htf5mEmaFast,  htf5mEmaSlow]  = request.security(syminfo.tickerid, "5",   [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htf15mEmaFast, htf15mEmaSlow] = request.security(syminfo.tickerid, "15",  [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htf30mEmaFast, htf30mEmaSlow] = request.security(syminfo.tickerid, "30",  [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htf1hEmaFast,  htf1hEmaSlow]  = request.security(syminfo.tickerid, "60",  [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htf4hEmaFast,  htf4hEmaSlow]  = request.security(syminfo.tickerid, "240", [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htfDEmaFast,   htfDEmaSlow]   = request.security(syminfo.tickerid, "D",   [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+[htfWEmaFast,   htfWEmaSlow]   = request.security(syminfo.tickerid, "W",   [ta.ema(close, 9), ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+
+// Calculate trend for each TF: 1 = Bull, -1 = Bear, 0 = Neutral
+int htf5mTrend  = htf5mEmaFast  > htf5mEmaSlow  ? 1 : htf5mEmaFast  < htf5mEmaSlow  ? -1 : 0
+int htf15mTrend = htf15mEmaFast > htf15mEmaSlow ? 1 : htf15mEmaFast < htf15mEmaSlow ? -1 : 0
+int htf30mTrend = htf30mEmaFast > htf30mEmaSlow ? 1 : htf30mEmaFast < htf30mEmaSlow ? -1 : 0
+int htf1hTrend  = htf1hEmaFast  > htf1hEmaSlow  ? 1 : htf1hEmaFast  < htf1hEmaSlow  ? -1 : 0
+int htf4hTrend  = htf4hEmaFast  > htf4hEmaSlow  ? 1 : htf4hEmaFast  < htf4hEmaSlow  ? -1 : 0
+int htfDTrend   = htfDEmaFast   > htfDEmaSlow   ? 1 : htfDEmaFast   < htfDEmaSlow   ? -1 : 0
+int htfWTrend   = htfWEmaFast   > htfWEmaSlow   ? 1 : htfWEmaFast   < htfWEmaSlow   ? -1 : 0
+
+// Get selected HTF trend (for filter)
+string htfTimeframe = getSelectedHTF()
+int htfTrend = switch htfTimeframe
+    "5"   => htf5mTrend
+    "15"  => htf15mTrend
+    "30"  => htf30mTrend
+    "60"  => htf1hTrend
+    "240" => htf4hTrend
+    "D"   => htfDTrend
+    "W"   => htfWTrend
+    => htf1hTrend
+string htfTrendStr = htfTrend == 1 ? "BULL" : htfTrend == -1 ? "BEAR" : "NEUTRAL"
+
+// Helper: trend to emoji
+trendEmoji(int t) => t == 1 ? "🟢" : t == -1 ? "🔴" : "⚪"
+trendStr(int t) => t == 1 ? "BULL" : t == -1 ? "BEAR" : "NEUTRAL"
+
+// 3.5 checkMTFFilter() - Check if signal aligns with HTF trend
+checkMTFFilter(_isBuy) =>
+    if not i_useMTF
+        true
+    else
+        _isBuy ? htfTrend >= 0 : htfTrend <= 0  // Allow neutral
+
+//======================================================
+//============= LAYER 3: DIVERGENCE DETECTION ==========
+//======================================================
+
+// RSI for divergence
+float divRsi = ta.rsi(close, i_divRsiLen)
+
+// Pivot detection using ta.pivothigh / ta.pivotlow
+float pivotLow  = ta.pivotlow(low, i_divLookback, i_divLookback)
+float pivotHigh = ta.pivothigh(high, i_divLookback, i_divLookback)
+float rsiPivotLow  = ta.pivotlow(divRsi, i_divLookback, i_divLookback)
+float rsiPivotHigh = ta.pivothigh(divRsi, i_divLookback, i_divLookback)
+
+// Store previous pivot values for comparison
+var float prevPriceLow  = na
+var float prevPriceHigh = na
+var float prevRsiLow    = na
+var float prevRsiHigh   = na
+var int   prevLowBar    = na
+var int   prevHighBar   = na
+
+// Divergence signals
+var bool bullishDiv = false
+var bool bearishDiv = false
+
+// Reset divergence flags each bar
+bullishDiv := false
+bearishDiv := false
+
+// Check for Bullish Divergence (price lower low, RSI higher low)
+if not na(pivotLow) and not na(rsiPivotLow)
+    if not na(prevPriceLow) and not na(prevRsiLow)
+        // Price made lower low
+        bool priceLowerLow = pivotLow < prevPriceLow
+        // RSI made higher low
+        bool rsiHigherLow = rsiPivotLow > prevRsiLow
+        // Bullish divergence confirmed
+        if priceLowerLow and rsiHigherLow
+            bullishDiv := true
+    // Update previous values
+    prevPriceLow := pivotLow
+    prevRsiLow   := rsiPivotLow
+    prevLowBar   := bar_index - i_divLookback
+
+// Check for Bearish Divergence (price higher high, RSI lower high)
+if not na(pivotHigh) and not na(rsiPivotHigh)
+    if not na(prevPriceHigh) and not na(prevRsiHigh)
+        // Price made higher high
+        bool priceHigherHigh = pivotHigh > prevPriceHigh
+        // RSI made lower high
+        bool rsiLowerHigh = rsiPivotHigh < prevRsiHigh
+        // Bearish divergence confirmed
+        if priceHigherHigh and rsiLowerHigh
+            bearishDiv := true
+    // Update previous values
+    prevPriceHigh := pivotHigh
+    prevRsiHigh   := rsiPivotHigh
+    prevHighBar   := bar_index - i_divLookback
+
+// Track last divergence for table display
+var string lastDivType = "None"
+var int    lastDivBar  = na
+
+if bullishDiv
+    lastDivType := "BULL"
+    lastDivBar  := bar_index
+if bearishDiv
+    lastDivType := "BEAR"
+    lastDivBar  := bar_index
+
+// Bars since last divergence
+int barsSinceDiv = na(lastDivBar) ? 999 : bar_index - lastDivBar
+
+//======================================================
+//============= S/R ZONE ENGINE =========================
+//======================================================
+// Clusters recent pivot highs/lows (reused from Divergence detection above) into
+// persistent zones, instead of a single rolling swing point that shifts every bar.
+
+const int ZONE_MAX = 3
+
+// Merge a new pivot into an existing zone (within tolerance) or add a new one.
+registerZone(array<float> _prices, array<int> _touches, array<int> _startBars, float _pivotPrice, float _tolerance, int _startBar, float _currentPrice) =>
+    int n = array.size(_prices)
+    int matchIdx = -1
+    if n > 0
+        for i = 0 to n - 1
+            if math.abs(_pivotPrice - array.get(_prices, i)) <= _tolerance
+                matchIdx := i
+    if matchIdx >= 0
+        array.set(_prices, matchIdx, (array.get(_prices, matchIdx) + _pivotPrice) / 2)
+        array.set(_touches, matchIdx, array.get(_touches, matchIdx) + 1)
+    else
+        if n >= ZONE_MAX
+            // Evict the LEAST relevant zone (farthest from current price), not the
+            // oldest - otherwise a stale zone from before a big move lingers just
+            // because it hasn't been around long enough to reach the front of the queue.
+            int worstIdx = 0
+            float worstDist = math.abs(_currentPrice - array.get(_prices, 0))
+            for i = 1 to n - 1
+                float d = math.abs(_currentPrice - array.get(_prices, i))
+                if d > worstDist
+                    worstDist := d
+                    worstIdx := i
+            array.remove(_prices, worstIdx)
+            array.remove(_touches, worstIdx)
+            array.remove(_startBars, worstIdx)
+        array.push(_prices, _pivotPrice)
+        array.push(_touches, 1)
+        array.push(_startBars, _startBar)
+
+// Is _price currently inside any zone in the list (within tolerance)? Also returns
+// that zone's touch count, so callers can show S/R strength instead of a bare bool.
+zoneMatch(array<float> _prices, array<int> _touches, float _tolerance, float _price) =>
+    bool inside = false
+    int touchCount = 0
+    if array.size(_prices) > 0
+        for i = 0 to array.size(_prices) - 1
+            if math.abs(_price - array.get(_prices, i)) <= _tolerance
+                inside := true
+                touchCount := array.get(_touches, i)
+    [inside, touchCount]
+
+// Index of the single most-relevant zone on one side of price, or -1 if none.
+// _wantAbove=true  -> nearest zone AT-OR-ABOVE price (the ceiling overhead)
+// _wantAbove=false -> nearest zone AT-OR-BELOW price (the floor underneath)
+// A zone price is only drawn on the side price actually faces it, so a level that
+// has been broken through (and no longer acts as S/R) simply drops off the chart.
+nearestZoneIdx(array<float> _prices, float _price, bool _wantAbove) =>
+    int bestIdx = -1
+    float bestDist = 0.0
+    if array.size(_prices) > 0
+        for i = 0 to array.size(_prices) - 1
+            float zp = array.get(_prices, i)
+            // Strict side test: a resistance must be ABOVE price, a support BELOW it.
+            // A pivot-low cluster price has since fallen below is no longer support -
+            // it drops off rather than showing as a green "support" under the price.
+            bool onSide = _wantAbove ? zp > _price : zp < _price
+            float d = math.abs(_price - zp)
+            if onSide and (bestIdx == -1 or d < bestDist)
+                bestDist := d
+                bestIdx := i
+    bestIdx
+
+// Drop zones price has clearly moved away from, every bar - not just when a new
+// pivot needs their slot. Without this, a zone from before a big gap/crash keeps
+// showing (e.g. an old "support" left dangling far above price after a drop) until
+// a fresh pivot happens to come along and evict it. % of price, not ATR, on purpose:
+// right after the same crash that makes a zone stale, ATR itself spikes too.
+const float ZONE_STALE_PCT = 0.06
+pruneStaleZones(array<float> _prices, array<int> _touches, array<int> _startBars, float _currentPrice, float _maxDist) =>
+    int idx = array.size(_prices) - 1
+    while idx >= 0
+        if math.abs(_currentPrice - array.get(_prices, idx)) > _maxDist
+            array.remove(_prices, idx)
+            array.remove(_touches, idx)
+            array.remove(_startBars, idx)
+        idx -= 1
+
+float zoneTol = sbAtr * i_zoneWidthMult
+float zoneStaleDist = close * ZONE_STALE_PCT
+
+// Dedicated stronger pivots for zones (larger lookback than the divergence pivots -
+// S/R levels should be more significant than every minor swing).
+float zonePivotHigh = ta.pivothigh(high, i_zonePivotLen, i_zonePivotLen)
+float zonePivotLow  = ta.pivotlow(low, i_zonePivotLen, i_zonePivotLen)
+
+pruneStaleZones(zoneResPrice, zoneResTouch, zoneResStartBar, close, zoneStaleDist)
+pruneStaleZones(zoneSupPrice, zoneSupTouch, zoneSupStartBar, close, zoneStaleDist)
+
+if not na(zonePivotHigh)
+    registerZone(zoneResPrice, zoneResTouch, zoneResStartBar, zonePivotHigh, zoneTol, bar_index - i_zonePivotLen, close)
+if not na(zonePivotLow)
+    registerZone(zoneSupPrice, zoneSupTouch, zoneSupStartBar, zonePivotLow, zoneTol, bar_index - i_zonePivotLen, close)
+
+[nearResistance, nearResTouches] = zoneMatch(zoneResPrice, zoneResTouch, zoneTol, close)
+[nearSupport, nearSupTouches]    = zoneMatch(zoneSupPrice, zoneSupTouch, zoneTol, close)
+
+// checkZoneFilter() - block BUY inside a resistance zone, SELL inside a support zone
+checkZoneFilter(_isBuy) =>
+    if not i_useZoneFilter
+        true
+    else
+        _isBuy ? not nearResistance : not nearSupport
+
+//======================================================
+//============= LAYER 3: RISK CALCULATOR ===============
+//======================================================
+
+// Currency symbols for display
+getCurrencySymbol(string curr) =>
+    switch curr
+        "USD" => "$"
+        "EUR" => "€"
+        "GBP" => "£"
+        "ILS" => "₪"
+        "JPY" => "¥"
+        "CAD" => "C$"
+        "AUD" => "A$"
+        "CHF" => "Fr"
+        => "$"
+
+string currSymbol = getCurrencySymbol(i_accountCurrency)
+
+// Get live exchange rate (USD to account currency)
+string fxPair = switch i_accountCurrency
+    "EUR" => "EURUSD"
+    "GBP" => "GBPUSD"
+    "ILS" => "USDILS"
+    "JPY" => "USDJPY"
+    "CAD" => "USDCAD"
+    "AUD" => "AUDUSD"
+    "CHF" => "USDCHF"
+    => ""
+
+float liveRate = na
+if i_useLiveRates and fxPair != "" and i_accountCurrency != "USD"
+    liveRate := request.security(fxPair, "D", close, lookahead=barmerge.lookahead_off)
+
+// Default rates as fallback
+float defaultRate = switch i_accountCurrency
+    "EUR" => 0.92
+    "GBP" => 0.79
+    "ILS" => 3.70
+    "JPY" => 150.0
+    "CAD" => 1.38
+    "AUD" => 1.55
+    "CHF" => 0.90
+    => 1.0
+
+// Calculate exchange rate (handle inverted pairs)
+float exchangeRate = i_accountCurrency == "USD" ? 1.0 :
+                     not i_useLiveRates ? i_manualRate :
+                     na(liveRate) ? (i_manualRate != 1.0 ? i_manualRate : defaultRate) :
+                     (i_accountCurrency == "EUR" or i_accountCurrency == "GBP" or i_accountCurrency == "AUD") ?
+                         1/liveRate : liveRate
+
+// Position size calculation function
+calcPositionSize(float _entry, float _sl) =>
+    // Calculate risk amount based on mode (% of Account or Fixed Amount)
+    float riskAmount = i_riskMode == "Fixed Amount" ? i_riskFixed : i_accountSize * (i_riskPct / 100)
+
+    // Convert risk to symbol currency if needed
+    string symbolCurr = syminfo.currency
+    if symbolCurr != i_accountCurrency and i_accountCurrency != "USD"
+        riskAmount := riskAmount / exchangeRate  // Convert to USD first if symbol is USD-based
+
+    float riskPerShare = math.abs(_entry - _sl)
+    float shares = riskPerShare > 0 ? math.floor(riskAmount / riskPerShare) : 0
+    float posValue = shares * _entry
+    float maxLoss = shares * riskPerShare
+
+    [shares, posValue, maxLoss, riskAmount]
+
+//======================================================
+//============= PREDICTION FUNCTIONS ===================
+//======================================================
+
+// EWA (Exponential Weighted Average)
+ewa_avg(array<int> arr, float decay) =>
+    float sum_w = 0.0
+    float sum_v = 0.0
+    int n = array.size(arr)
+    for i = 0 to n - 1
+        float w = math.pow(decay, n - 1 - i)
+        sum_w += w
+        sum_v += array.get(arr, i) * w
+    sum_w > 0 ? sum_v / sum_w : 0.0
+
+// EWA Standard Deviation
+ewa_stdev(array<int> arr, float avg, float decay) =>
+    float sum_w = 0.0
+    float sum_sq = 0.0
+    int n = array.size(arr)
+    for i = 0 to n - 1
+        float w = math.pow(decay, n - 1 - i)
+        float diff = array.get(arr, i) - avg
+        sum_w += w
+        sum_sq += w * diff * diff
+    sum_w > 0 ? math.sqrt(sum_sq / sum_w) : 0.0
+
+// Get median of array
+array_median(array<int> arr) =>
+    int n = array.size(arr)
+    if n == 0
+        0.0
+    else
+        array<int> sorted = array.copy(arr)
+        array.sort(sorted)
+        n % 2 == 1 ? float(array.get(sorted, n/2)) : (array.get(sorted, n/2-1) + array.get(sorted, n/2)) / 2.0
+
+// 1. Structure Multiplier (S/R proximity)
+get_structure_mult() =>
+    float pivotHi = ta.pivothigh(high, 10, 10)
+    float pivotLo = ta.pivotlow(low, 10, 10)
+    float atr = ta.atr(14)
+    bool nearLevel = (not na(pivotHi) and math.abs(close - pivotHi) < atr) or
+                     (not na(pivotLo) and math.abs(close - pivotLo) < atr)
+    nearLevel ? 0.7 : 1.0
+
+// 2. Stock Type Multiplier (use existing detectedAsset)
+get_stock_type_mult(string _asset) =>
+    switch _asset
+        ASSET_CRYPTO => 0.60
+        ASSET_FOREX => 0.80
+        ASSET_FUTURES => 0.90
+        ASSET_BOND => 1.35
+        => 1.0  // Stock, Index, Fund, CFD
+
+// 3. Flip Strength Multiplier (enhanced with filter count)
+get_flip_strength_mult(bool _regimeOk, bool _volFilterOk, bool _stFilterOk, float _currentATR, float _avgATR) =>
+    float vol_score = math.min(40, (volume / ta.sma(volume, 20) - 1) * 40)
+    float atr_score = math.min(30, ((_currentATR / _avgATR) - 1) * 30)
+
+    // Filter pass count bonus
+    int filters_passed = 0
+    if _regimeOk
+        filters_passed += 1
+    if _volFilterOk
+        filters_passed += 1
+    if _stFilterOk
+        filters_passed += 1
+    float filter_score = filters_passed * 10  // 0-30 points
+
+    float total = vol_score + atr_score + filter_score
+    0.5 + (total / 100) * 1.5  // Range: 0.5x to 2.0x
+
+// 4. Error Learning Multiplier
+get_learning_mult() =>
+    int n = array.size(pred_error_ratios)
+    if n < 3
+        1.0
+    else
+        float avg_err = array.avg(pred_error_ratios)
+        if avg_err > 1.0
+            1.0 - math.min((avg_err - 1.0) * 0.5, 0.15)
+        else
+            1.0 + math.min((1.0 - avg_err) * 0.5, 0.15)
+
+// 5. Regime Multiplier
+get_regime_mult(bool _isBullish) =>
+    array<int> recent = _isBullish ? pred_bull_durations : pred_bear_durations
+    int n = array.size(recent)
+    if n < 6
+        1.0
+    else
+        float recent_avg = (array.get(recent, n-1) + array.get(recent, n-2) + array.get(recent, n-3)) / 3
+        float hist_avg = array.avg(recent)
+        float ratio = recent_avg / hist_avg
+        ratio >= 1.3 ? 1.2 : ratio >= 1.1 ? 1.1 : ratio <= 0.7 ? 0.8 : ratio <= 0.9 ? 0.9 : 1.0
+
+//======================================================
+//============= PRESET RESOLUTION =======================
+//======================================================
+// Resolve the 1-click Trading Style into effective Sensitivity / ATR / Chop values.
+// "Auto" maps the chart timeframe to a style; "Custom" falls back to the manual inputs.
+// All kept as simple/const so ta.atr(effAtr) accepts the length.
+string autoStyle = timeframe.isintraday ? ((timeframe.isseconds or timeframe.multiplier <= 5) ? "Scalping" : timeframe.multiplier <= 60 ? "Day Trading" : "Swing") : timeframe.isdaily ? "Swing" : "Position"
+string effStyle  = i_preset == "Auto (from TF)" ? autoStyle : i_preset
+// Classic mode bypasses presets and uses the raw manual Key/ATR (plain UT Bot).
+float effKey  = i_classicUT ? utKey : effStyle == "Scalping" ? 1.0 : effStyle == "Day Trading" ? 1.5 : effStyle == "Swing" ? 2.0 : effStyle == "Position" ? 2.5 : utKey
+int   effAtr  = i_classicUT ? utAtrPeriod : effStyle == "Scalping" ? 7 : effStyle == "Day Trading" ? 10 : effStyle == "Swing" ? 14 : effStyle == "Position" ? 20 : utAtrPeriod
+float effChop = i_classicUT ? 0.0 : effStyle == "Scalping" ? 1.3 : effStyle == "Day Trading" ? 1.1 : effStyle == "Swing" ? 1.0 : effStyle == "Position" ? 0.9 : i_chopStrength
+
+// Preset-driven Stop Loss: a preset auto-sets a style-matched ATR stop (tight for scalping,
+// wide for position) so the SL/TP are not too wide for fast timeframes. Custom/Classic keep
+// the manual SL method + multiplier. TP levels are R-multiples of the SL, so they scale too.
+bool   slManual  = i_preset == "Custom (manual)" or i_classicUT
+string slMethod  = slManual ? i_slMethod : "ATR"
+float  slAtrMult = slManual ? i_slAtrMult : effStyle == "Scalping" ? 1.0 : effStyle == "Day Trading" ? 1.3 : effStyle == "Swing" ? 1.8 : effStyle == "Position" ? 2.3 : i_slAtrMult
+
+//======================================================
+//================= BASE CONDITIONS ====================
+//======================================================
+
+// Custom Momentum-Weighted Trailing System
+srcUT = close
+xATR   = ta.atr(effAtr)
+
+// Momentum/volume/asset-adaptive trail DISTANCE, applied via a classic RATCHETING
+// UT-Bot stop (QuantNomad). The old version smoothed the stop with a 0.3 EWMA around a
+// non-ratcheting target, which lagged badly -> signals fired well AFTER the turn. A
+// ratchet only tightens in the trend direction and flips exactly when price crosses it,
+// so signals arrive at the reversal, not late. Adaptive distance keeps the "momentum-
+// weighted" behaviour (wider trail in strong/high-volume moves).
+var float xATRTrailingStop = na
+float volRatio = volume / ta.sma(volume, 20)
+float baseKey = i_classicUT ? effKey : effKey * assetMult * adaptiveMult
+// Kaufman Efficiency Ratio (0..1): |net move| / sum(|bar moves|) over erLen bars.
+// ~1 = clean trend, ~0 = pure chop. Responsive (no ADX-style lag), so it can widen the
+// stop in chop and tighten it in trend without blocking the flip bar.
+float erChange = math.abs(srcUT - srcUT[10])
+float erVol    = math.sum(math.abs(srcUT - srcUT[1]), 10)
+float er       = nz(erChange / erVol, 0.0)   // nz: na (warmup) or /0 -> 0 (treat as chop), no na cascade into the stop
+float chopMult = (i_smartTrail and not i_classicUT) ? 1.0 + (1.0 - er) * effChop : 1.0
+// Volume conviction (mild) + chop adaptation. Classic mode drops both so the stop is
+// exactly ATR × Key (plain UT Bot). Momentum-widening was dropped earlier (it delayed reversals).
+float adaptiveKey = i_classicUT ? baseKey : baseKey * math.max(0.8, math.min(1.2, volRatio))
+float trailDist = xATR * adaptiveKey * chopMult
+
+float prevStop = xATRTrailingStop[1]
+if na(prevStop)
+    xATRTrailingStop := srcUT
+else if srcUT > prevStop and srcUT[1] > prevStop
+    xATRTrailingStop := math.max(prevStop, srcUT - trailDist)
+else if srcUT < prevStop and srcUT[1] < prevStop
+    xATRTrailingStop := math.min(prevStop, srcUT + trailDist)
+else if srcUT > prevStop
+    xATRTrailingStop := srcUT - trailDist
+else
+    xATRTrailingStop := srcUT + trailDist
+
+// 1.3 checkConfirmation() - Require N consecutive bars in trend direction
+// Returns: true if price has confirmed direction for i_confirmBars bars
+checkConfirmation(_isBuy) =>
+    bool confirmed = true
+    if i_confirmBars > 1
+        for i = 1 to i_confirmBars - 1
+            if _isBuy
+                if close[i] <= xATRTrailingStop[i]
+                    confirmed := false
+                    break
+            else
+                if close[i] >= xATRTrailingStop[i]
+                    confirmed := false
+                    break
+    confirmed
+
+above = ta.crossover(srcUT, xATRTrailingStop)
+below = ta.crossunder(srcUT, xATRTrailingStop)
+
+// Guard extremely small prices from exploding percentage
+atrPct = srcUT != 0 ? (xATR / srcUT * 100.0) : 0.0
+float atrPctSafe = math.min(atrPct, 20.0)
+kUT    = 0.50
+thr    = math.max(utPctThr, atrPctSafe * kUT)
+
+barbuy  = srcUT > xATRTrailingStop
+barsell = srcUT < xATRTrailingStop
+
+// Prediction: Detect UT Bot trend flip
+bool pred_flip_to_bull = barbuy and not barbuy[1]
+bool pred_flip_to_bear = barsell and not barsell[1]
+bool pred_flip = pred_flip_to_bull or pred_flip_to_bear
+
+// Save duration BEFORE reset (critical for storing completed trend)
+int pred_completed_duration = pred_current_bars
+
+// Track current trend duration (reset to 1 on flip, otherwise increment)
+pred_current_bars := pred_flip ? 1 : pred_current_bars + 1
+
+// On flip: ALWAYS store completed trend (for historical learning)
+if pred_flip
+    // Store completed trend to arrays (ALWAYS, regardless of prediction toggle)
+    if pred_completed_duration > 1
+        if pred_is_bullish
+            array.push(pred_bull_durations, pred_completed_duration)
+        else
+            array.push(pred_bear_durations, pred_completed_duration)
+        array.push(pred_all_durations, pred_completed_duration)
+        array.push(pred_all_is_bullish, pred_is_bullish)
+
+        // Trim arrays to max size
+        if array.size(pred_all_durations) > i_predSamples
+            array.shift(pred_all_durations)
+            array.shift(pred_all_is_bullish)
+        if array.size(pred_bull_durations) > i_predSamples
+            array.shift(pred_bull_durations)
+        if array.size(pred_bear_durations) > i_predSamples
+            array.shift(pred_bear_durations)
+
+    // Store accuracy of previous prediction (only when prediction was enabled)
+    if i_enablePrediction and not na(pred_end) and pred_completed_duration > 1
+        array.push(pred_last10_predicted, pred_end)
+        array.push(pred_last10_actual, pred_completed_duration)
+        array.push(pred_last10_bullish, pred_is_bullish)
+        float error_ratio = pred_end > 0 ? float(pred_completed_duration) / pred_end : 1.0
+        array.push(pred_error_ratios, error_ratio)
+        if array.size(pred_last10_predicted) > 10
+            array.shift(pred_last10_predicted)
+            array.shift(pred_last10_actual)
+            array.shift(pred_last10_bullish)
+        if array.size(pred_error_ratios) > 10
+            array.shift(pred_error_ratios)
+
+    // Update state (AFTER storing with old direction values)
+    pred_is_bullish := pred_flip_to_bull
+
+    // Calculate prediction (only when enabled)
+    if i_enablePrediction
+        array<int> relevant = pred_is_bullish ? pred_bull_durations : pred_bear_durations
+        int samples = array.size(relevant)
+
+        if samples >= 3
+            pred_using_fallback := false
+            if i_predMode == "Simple"
+                float median = array_median(relevant)
+                pred_avg := median
+                pred_end := median * 2.5
+            else
+                float avg = ewa_avg(relevant, 0.9)
+                float stdev = ewa_stdev(relevant, avg, 0.9)
+                pred_avg := avg
+                pred_end := avg + 2.0 * stdev
+
+                if i_predMode == "Advanced"
+                    // Apply multipliers
+                    float total_mult = 1.0
+                    total_mult *= get_structure_mult()
+                    total_mult *= get_stock_type_mult(detectedAsset)
+                    total_mult *= get_flip_strength_mult(l1_regimeOk, checkVolumeFilter(), checkSuperTrendFilter(pred_is_bullish), currentATR, avgATR)
+                    total_mult *= get_learning_mult()
+                    total_mult *= get_regime_mult(pred_is_bullish)
+                    total_mult := math.max(0.4, math.min(2.0, total_mult))
+                    pred_end *= total_mult
+        else
+            // Not enough same-direction history yet. Progressive fallback so a
+            // forecast ALWAYS renders (this smoothed UT line flips often, so many
+            // "trends" are 1 bar and never get recorded - without a fallback the
+            // learning arrays can sit under 3 forever and the cone never appears).
+            pred_using_fallback := true
+            int allSamples = array.size(pred_all_durations)
+            if allSamples >= 3
+                float avgAll = ewa_avg(pred_all_durations, 0.9)
+                float stdevAll = ewa_stdev(pred_all_durations, avgAll, 0.9)
+                pred_avg := avgAll
+                pred_end := avgAll + 2.0 * stdevAll
+            else if allSamples >= 1
+                float avgAll = ewa_avg(pred_all_durations, 0.9)
+                pred_avg := avgAll
+                pred_end := avgAll * 2.5
+            else
+                // Zero completed trends recorded yet - neutral default horizon
+                pred_avg := 8.0
+                pred_end := 16.0
+
+        // Cap the projection at the 90th percentile of ACTUAL trend lengths. On thin/
+        // noisy history (e.g. weekly charts) avg + 2*stdev balloons far past anything ever
+        // observed, pushing the strip into never-reached territory where every empirical
+        // survival-% is 0. Capping at p90 keeps the strip inside real history, so the % span
+        // from high down to ~10% instead of collapsing to 0. Only bites when the estimate
+        // exceeds p90 (the noisy case); tight, reliable estimates pass through unchanged.
+        array<int> capArr = pred_all_durations
+        if samples >= 3
+            capArr := relevant
+        if not na(pred_end) and array.size(capArr) >= 3
+            float p90dur = array.percentile_nearest_rank(capArr, 90)
+            if p90dur > 0
+                pred_end := math.min(pred_end, p90dur)
+
+chgOk     = not utUsePctFilter or (math.abs(srcUT - srcUT[1]) / srcUT[1] * 100.0 > thr)
+
+// Momentum structure validation
+float _lo = na
+float _hi = na
+if utUseSwingFilter
+    _lo := ta.lowest(srcUT, swingLen)
+    _hi := ta.highest(srcUT, swingLen)
+
+swingOkBuy  = not utUseSwingFilter or srcUT > _lo * 1.01
+swingOkSell = not utUseSwingFilter or srcUT < _hi * 0.99
+
+// 2-bar delay
+flipUp = above
+flipDn = below
+utBuy  = (utUseDelay ? ((bar_index > 1 ? flipUp[2]  : false) and (bar_index > 0 ? barbuy[1]  : false) and (bar_index > 1 ? barbuy[2]  : false)) : flipUp)  and chgOk and swingOkBuy
+utSell = (utUseDelay ? ((bar_index > 1 ? flipDn[2]  : false) and (bar_index > 0 ? barsell[1] : false) and (bar_index > 1 ? barsell[2] : false)) : flipDn) and chgOk and swingOkSell
+
+// Full candle confirmation: require entire candle above/below UT line
+bool fullCandleBuyOk  = not i_useFullCandle or low > xATRTrailingStop   // Entire candle above line
+bool fullCandleSellOk = not i_useFullCandle or high < xATRTrailingStop  // Entire candle below line
+
+confirmRealBuy  = close > xATRTrailingStop and fullCandleBuyOk
+confirmRealSell = close < xATRTrailingStop and fullCandleSellOk
+
+// Apply Layer 1 filters
+bool l1_confirmBuy  = checkConfirmation(true)
+bool l1_confirmSell = checkConfirmation(false)
+
+utBuy  := utBuy  and confirmRealBuy  and l1_regimeOk and l1_cooldownOk and l1_confirmBuy  and l1_volumeOk and l1_volatilityOk and checkRSIFilter(true)  and checkHullFilter(true)  and checkSuperTrendFilter(true)  and checkMTFFilter(true)  and checkZoneFilter(true)
+utSell := utSell and confirmRealSell and l1_regimeOk and l1_cooldownOk and l1_confirmSell and l1_volumeOk and l1_volatilityOk and checkRSIFilter(false) and checkHullFilter(false) and checkSuperTrendFilter(false) and checkMTFFilter(false) and checkZoneFilter(false)
+
+// Prevent consecutive same-direction signals (must alternate BUY/SELL)
+utBuy  := utBuy  and lastSignalDir != 1
+utSell := utSell and lastSignalDir != -1
+
+// Update lastSignalBar and lastSignalDir when signal fires (ONLY on bar close to prevent race condition)
+if utBuy and barstate.isconfirmed
+    lastSignalBar := bar_index
+    lastSignalDir := 1
+if utSell and barstate.isconfirmed
+    lastSignalBar := bar_index
+    lastSignalDir := -1
+
+bool utVizGate = barstate.isconfirmed or not barstate.isrealtime
+
+// Feature ON/OFF
+bool slFeatureOn    = slShow and utShowLabels
+bool tpFeatureOn    = tpShow and utShowLabels
+bool entryFeatureOn = entryShow 
+
+// Creates SL line/label if missing and returns them
+ensureSLObjects(line _ln, label _lb, int _x, float _y, color _c) =>
+    line ln_result = _ln
+    label lb_result = _lb
+    if na(ln_result) and not na(_x) and not na(_y)
+        ln_result := line.new(_x, _y, _x, _y, xloc=xloc.bar_index, extend=extend.none, color=_c, width=2)
+    if na(lb_result) and not na(_x) and not na(_y)
+        lb_result := label.new(_x, _y, "Suggested Stop Loss", xloc=xloc.bar_index, style=label.style_label_left, textcolor=color.white, color=_c, size=labelSize)
+    [ln_result, lb_result]
+
+// Forward state flags used by visual gates
+var bool legDone     = false
+var int  legDoneBar  = na
+var bool slFrozen    = false
+var bool entryFrozen = false
+var bool tp1Frozen   = false
+var bool tp15Frozen  = false
+var bool tp2Frozen   = false
+var bool tp3Frozen   = false
+
+// Visual gates (allow forced draw on touch/freeze even if "draw on close" is ON)
+bool slShowVis    = slFeatureOn    and (utVizGate or slFrozen or legDone)
+bool tpShowVis    = tpFeatureOn    and (utVizGate or tp1Frozen or tp15Frozen or tp2Frozen or tp3Frozen or legDone)
+bool entryShowVis = entryFeatureOn and (utVizGate or entryFrozen or legDone)
+
+// mark TP hits so labels can show ✅ even if they were off and later re-shown
+var bool tp1Hit  = false
+var bool tp15Hit = false
+var bool tp2Hit  = false
+var bool tp3Hit  = false
+
+// Buy/Sell label tracking (limit to 30)
+const int MAX_SIGNAL_LABELS = 8
+var array<label> signalLabels = array.new<label>()
+
+// cap helper: do not extend objects past the bar where the leg ended
+capX2(int x) =>
+    not na(legDoneBar) ? math.min(x, legDoneBar) : x
+
+//======================================================
+//====================== VISUALS =======================
+//======================================================
+
+plot(utShowLine ? xATRTrailingStop : na, title="UT Trailing Stop", color=color.orange, linewidth=2)
+plot(i_showStLine ? stValue : na, title="SuperTrend", color=stBullish ? color.green : color.red, linewidth=2, style=plot.style_linebr)
+
+// Confidence score (0-100) computed HERE (before the labels) so the flip's conviction is
+// printed on the Buy/Sell label itself. Weights: UT 26, SuperTrend 21, Structure 18, ADX 13,
+// MTF 8, Volume 10, Divergence 4. conf_*/confidenceScore stay global for the table below.
+float conf_ut_score = barbuy or barsell ? 26.0 : 13.0
+bool conf_st_aligned = (barbuy and stBullish) or (barsell and stBearish)
+float conf_st_score = conf_st_aligned ? 12.0 + (stStrength / 100.0 * 9.0) : 4.0
+bool conf_sb_aligned = (barbuy and sbBullish) or (barsell and sbBearish)
+float conf_sb_score = conf_sb_aligned ? 11.0 + (sbStrength / 100.0 * 7.0) : 4.0
+float conf_adx_score = l1_regimeOk ? 13.0 : 4.0
+bool conf_mtf_aligned = (barbuy and htfTrend >= 0) or (barsell and htfTrend <= 0)
+float conf_mtf_score = conf_mtf_aligned ? 8.0 : 2.0
+float conf_vol_score = volRatio >= 2.0 ? 10.0 : volRatio >= 1.5 ? 8.0 : volRatio >= 1.0 ? 6.0 : 3.0
+bool conf_div_recent  = barsSinceDiv <= i_divLookback * 4
+bool conf_div_aligned = conf_div_recent and ((barbuy and lastDivType == "BULL") or (barsell and lastDivType == "BEAR"))
+bool conf_div_opposed = conf_div_recent and ((barbuy and lastDivType == "BEAR") or (barsell and lastDivType == "BULL"))
+float conf_div_score  = conf_div_aligned ? 4.0 : conf_div_opposed ? 0.0 : 2.0
+float confidenceScore = conf_ut_score + conf_st_score + conf_sb_score + conf_adx_score + conf_mtf_score + conf_vol_score + conf_div_score
+confidenceScore := math.min(100.0, math.max(0.0, confidenceScore))
+
+// Anti-Repaint: Labels only on confirmed bars
+bool utPlotGate = utShowLabels and utVizGate
+// Buy/Sell labels show the flip's Confidence % on the label itself; a "⭐" is added when a
+// recent RSI divergence agrees with the signal (higher-conviction reversal).
+int divWindow = i_divLookback * 4
+string confTxt = " " + str.tostring(confidenceScore, "#") + "%"
+if utPlotGate and utBuy
+    bool buyDivOk = lastDivType == "BULL" and barsSinceDiv <= divWindow
+    label newLbl = label.new(bar_index, low, (buyDivOk ? "Buy ⭐" : "Buy") + confTxt, style=label.style_label_up, color=buyDivOk ? color.new(#00e0b0, 0) : color.aqua, textcolor=color.white, size=labelSize, tooltip="Confidence: " + str.tostring(confidenceScore, "#") + "/100" + (buyDivOk ? "\n⭐ Backed by a recent Bullish RSI Divergence (" + str.tostring(barsSinceDiv) + " bars ago) - higher-conviction reversal." : ""))
+    array.push(signalLabels, newLbl)
+    if array.size(signalLabels) > MAX_SIGNAL_LABELS
+        label.delete(array.shift(signalLabels))
+if utPlotGate and utSell
+    bool sellDivOk = lastDivType == "BEAR" and barsSinceDiv <= divWindow
+    label newLbl = label.new(bar_index, high, (sellDivOk ? "Sell ⭐" : "Sell") + confTxt, style=label.style_label_down, color=sellDivOk ? color.new(#ff5b7f, 0) : color.orange, textcolor=color.white, size=labelSize, tooltip="Confidence: " + str.tostring(confidenceScore, "#") + "/100" + (sellDivOk ? "\n⭐ Backed by a recent Bearish RSI Divergence (" + str.tostring(barsSinceDiv) + " bars ago) - higher-conviction reversal." : ""))
+    array.push(signalLabels, newLbl)
+    if array.size(signalLabels) > MAX_SIGNAL_LABELS
+        label.delete(array.shift(signalLabels))
+barcolor(utColorBars ? (barbuy ? color.aqua : barsell ? color.orange : na) : na)
+
+//======================================================
+//============= RIBBON FILL (Gradient) =================
+//======================================================
+
+// Gate: only show ribbon when enabled
+bool ribbon_active = utShowRibbon
+
+// Base color based on trend direction
+color ribbonBaseColor = barbuy ? #00CED1 : #FF6B6B
+
+// Helper function for layer interpolation (16 slices for 15 layers)
+get_ribbon_layer(float _start, float _end, int _step) =>
+    (_start * (15 - _step) + _end * _step) / 15
+
+// Calculate layer positions from close to xATRTrailingStop
+float rl1  = ribbon_active ? close : na
+float rl2  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 1) : na
+float rl3  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 2) : na
+float rl4  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 3) : na
+float rl5  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 4) : na
+float rl6  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 5) : na
+float rl7  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 6) : na
+float rl8  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 7) : na
+float rl9  = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 8) : na
+float rl10 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 9) : na
+float rl11 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 10) : na
+float rl12 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 11) : na
+float rl13 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 12) : na
+float rl14 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 13) : na
+float rl15 = ribbon_active ? get_ribbon_layer(close, xATRTrailingStop, 14) : na
+float rl16 = ribbon_active ? xATRTrailingStop : na
+
+// Calculate gradient colors: 85% opacity (light, near price) → 30% (dark, near UT line)
+color rc1  = ribbon_active ? color.new(ribbonBaseColor, 85) : na
+color rc2  = ribbon_active ? color.new(ribbonBaseColor, 81) : na
+color rc3  = ribbon_active ? color.new(ribbonBaseColor, 77) : na
+color rc4  = ribbon_active ? color.new(ribbonBaseColor, 73) : na
+color rc5  = ribbon_active ? color.new(ribbonBaseColor, 69) : na
+color rc6  = ribbon_active ? color.new(ribbonBaseColor, 65) : na
+color rc7  = ribbon_active ? color.new(ribbonBaseColor, 61) : na
+color rc8  = ribbon_active ? color.new(ribbonBaseColor, 57) : na
+color rc9  = ribbon_active ? color.new(ribbonBaseColor, 53) : na
+color rc10 = ribbon_active ? color.new(ribbonBaseColor, 49) : na
+color rc11 = ribbon_active ? color.new(ribbonBaseColor, 45) : na
+color rc12 = ribbon_active ? color.new(ribbonBaseColor, 41) : na
+color rc13 = ribbon_active ? color.new(ribbonBaseColor, 37) : na
+color rc14 = ribbon_active ? color.new(ribbonBaseColor, 33) : na
+color rc15 = ribbon_active ? color.new(ribbonBaseColor, 30) : na
+
+// Plot 16 invisible lines
+rp1  = plot(rl1,  display=display.none, editable=false)
+rp2  = plot(rl2,  display=display.none, editable=false)
+rp3  = plot(rl3,  display=display.none, editable=false)
+rp4  = plot(rl4,  display=display.none, editable=false)
+rp5  = plot(rl5,  display=display.none, editable=false)
+rp6  = plot(rl6,  display=display.none, editable=false)
+rp7  = plot(rl7,  display=display.none, editable=false)
+rp8  = plot(rl8,  display=display.none, editable=false)
+rp9  = plot(rl9,  display=display.none, editable=false)
+rp10 = plot(rl10, display=display.none, editable=false)
+rp11 = plot(rl11, display=display.none, editable=false)
+rp12 = plot(rl12, display=display.none, editable=false)
+rp13 = plot(rl13, display=display.none, editable=false)
+rp14 = plot(rl14, display=display.none, editable=false)
+rp15 = plot(rl15, display=display.none, editable=false)
+rp16 = plot(rl16, display=display.none, editable=false)
+
+// Fill 15 layers with gradient
+fill(rp1,  rp2,  ribbon_active ? rc1  : na, editable=false)
+fill(rp2,  rp3,  ribbon_active ? rc2  : na, editable=false)
+fill(rp3,  rp4,  ribbon_active ? rc3  : na, editable=false)
+fill(rp4,  rp5,  ribbon_active ? rc4  : na, editable=false)
+fill(rp5,  rp6,  ribbon_active ? rc5  : na, editable=false)
+fill(rp6,  rp7,  ribbon_active ? rc6  : na, editable=false)
+fill(rp7,  rp8,  ribbon_active ? rc7  : na, editable=false)
+fill(rp8,  rp9,  ribbon_active ? rc8  : na, editable=false)
+fill(rp9,  rp10, ribbon_active ? rc9  : na, editable=false)
+fill(rp10, rp11, ribbon_active ? rc10 : na, editable=false)
+fill(rp11, rp12, ribbon_active ? rc11 : na, editable=false)
+fill(rp12, rp13, ribbon_active ? rc12 : na, editable=false)
+fill(rp13, rp14, ribbon_active ? rc13 : na, editable=false)
+fill(rp14, rp15, ribbon_active ? rc14 : na, editable=false)
+fill(rp15, rp16, ribbon_active ? rc15 : na, editable=false)
+
+// Trend Duration Prediction - drawn LIVE at the CURRENT bar, projecting the expected
+// REMAINING life of the ongoing trend forward from NOW. Anchored to the CURRENT UT-line
+// level (not a stale flip level) and to bar_index, so the strip + labels stay glued to
+// the current price/bar instead of drifting off to an old flip. Single set, redrawn each tick.
+int PRED_SEG = 24
+if i_enablePrediction and barstate.islast
+    float pe = (na(pred_end) or pred_end <= 0) ? 16.0 : pred_end
+    float pa = na(pred_avg) ? pe / 2.0 : pred_avg
+    bool  peFallback = pred_using_fallback or na(pred_end) or pred_end <= 0
+    bool  isBull = pred_is_bullish
+    color base_col = isBull ? color.green : color.red
+    // Expected bars LEFT in the current trend (total estimate minus bars already elapsed),
+    // floored so an "overdue" trend still shows a short cone; capped <480 (future-draw limit).
+    float remaining = math.min(480.0, math.max(pe - pred_current_bars, math.round(pe * 0.25)))
+
+    // wipe + redraw the single live set
+    if array.size(pred_boxes) > 0
+        for i = 0 to array.size(pred_boxes) - 1
+            box.delete(array.get(pred_boxes, i))
+    array.clear(pred_boxes)
+    if array.size(pred_labels) > 0
+        for i = 0 to array.size(pred_labels) - 1
+            label.delete(array.get(pred_labels, i))
+    array.clear(pred_labels)
+
+    // Thin ATR strip just off the CURRENT UT line (bull: below price, bear: above price)
+    float predATR = ta.atr(14)
+    float box_height = predATR * 0.12
+    float box_top = na
+    float box_bottom = na
+    if isBull
+        box_top := xATRTrailingStop - predATR * 0.03
+        box_bottom := box_top - box_height
+    else
+        box_bottom := xATRTrailingStop + predATR * 0.03
+        box_top := box_bottom + box_height
+    float box_width = remaining / PRED_SEG
+    // Outer side of the strip (away from the candles) for the header + % labels, so they
+    // never sit on the bars. Header sits further out than the % row.
+    float pct_y    = isBull ? box_bottom - predATR * 0.20 : box_top + predATR * 0.20
+    float hdr_y    = isBull ? box_bottom - predATR * 0.55 : box_top + predATR * 0.55
+    string hdrStyle = isBull ? label.style_label_up : label.style_label_down
+
+    array<int> relevant = isBull ? pred_bull_durations : pred_bear_durations
+
+    // Gradient boxes: from the CURRENT bar forward over the remaining expected bars
+    if i_showPredBoxes
+        for i = 0 to PRED_SEG - 1
+            int box_left  = bar_index + int(i * box_width)
+            int box_right = bar_index + math.max(int((i + 1) * box_width), int(i * box_width) + 1)
+            int opacity = 15 + int((i / float(PRED_SEG - 1)) * 80)
+            box nb = box.new(box_left, box_top, box_right, box_bottom, bgcolor=color.new(base_col, opacity), border_color=na)
+            array.push(pred_boxes, nb)
+        int header_samples = peFallback ? array.size(pred_all_durations) : array.size(relevant)
+        string direction_str = isBull ? "BULLISH" : "BEARISH"
+        string confidence_str = header_samples >= 30 ? "High" : header_samples >= 15 ? "Medium" : "Low"
+        string fallback_note = peFallback ? "\n⚠️ Not enough " + direction_str + "-only history yet - rough estimate, sharpens as more trends complete.\n" : ""
+        string header_tooltip = "📊 TREND FORECAST\n═══════════════════════\n\n🎯 Direction: " + direction_str + "\n📈 Mode: " + i_predMode + "\n\n⏱️ DURATION ESTIMATE:\n• Expected total: " + str.tostring(pe, "#") + " bars\n• Average: " + str.tostring(pa, "#.#") + " bars\n• Elapsed so far: " + str.tostring(pred_current_bars) + " bars\n• Remaining: ~" + str.tostring(remaining, "#") + " bars\n" + fallback_note + "\n📊 DATA:\n• Sample Size: " + str.tostring(header_samples) + " trends\n• Confidence: " + confidence_str + "\n\n" + "💡 Cone = expected remaining life of the CURRENT trend; % = rough chance it is still alive that far ahead.\n\n⚠️ Historical estimate, not a guarantee."
+        label lbl_center = label.new(bar_index + int(remaining * 0.5), hdr_y, "🔮 Trend Analysis", style=hdrStyle, color=color.new(color.blue, 0), textcolor=color.white, size=size.small, tooltip=header_tooltip, yloc=yloc.price)
+        array.push(pred_labels, lbl_center)
+
+    // Survival % milestones along the cone (distinct, declining), near the current bar
+    if i_showPredLabels
+        array<float> fracs = array.from(0.25, 0.50, 0.75, 1.00)
+        array<int>   survs = array.from(75, 50, 25, 10)
+        for i = 0 to 3
+            float fr = array.get(fracs, i)
+            int surv = array.get(survs, i)
+            int x = bar_index + math.max(1, int(remaining * fr))
+            label lbl_prob = label.new(x, pct_y, str.tostring(surv) + "%", style=label.style_none, textcolor=base_col, text_formatting=text.format_bold, size=size.small, yloc=yloc.price, tooltip="~" + str.tostring(surv) + "% chance the current trend is still alive ~" + str.tostring(int(remaining * fr)) + " bars from now.")
+            array.push(pred_labels, lbl_prob)
+
+// Divergence labels on chart
+if i_showDivergence and bullishDiv
+    string bullDivTooltip = "🟢 BULLISH DIVERGENCE\n\nPrice: Lower Low ↘\nRSI: Higher Low ↗\n\nPrevious Price Low: " + str.tostring(prevPriceLow, "#.##") + "\n" + "Current Price Low: " + str.tostring(pivotLow, "#.##") + "\n" + "Previous RSI Low: " + str.tostring(prevRsiLow, "#.#") + "\n" + "Current RSI Low: " + str.tostring(rsiPivotLow, "#.#") + "\n\n" + "📈 SIGNAL: Potential reversal UP\n" + "Selling pressure weakening despite lower prices"
+    label.new(bar_index - i_divLookback, low[i_divLookback], "Bull\nDiv",
+              style=label.style_label_up, color=color.new(color.green, 30),
+              textcolor=color.white, size=labelSize, tooltip=bullDivTooltip)
+
+if i_showDivergence and bearishDiv
+    string bearDivTooltip = "🔴 BEARISH DIVERGENCE\n\n" + "Price: Higher High ↗\n" + "RSI: Lower High ↘\n\n" + "Previous Price High: " + str.tostring(prevPriceHigh, "#.##") + "\n" + "Current Price High: " + str.tostring(pivotHigh, "#.##") + "\n" + "Previous RSI High: " + str.tostring(prevRsiHigh, "#.#") + "\n" + "Current RSI High: " + str.tostring(rsiPivotHigh, "#.#") + "\n\n" + "📉 SIGNAL: Potential reversal DOWN\n" + "Buying pressure weakening despite higher prices" 
+    label.new(bar_index - i_divLookback, high[i_divLookback], "Bear\nDiv",
+              style=label.style_label_down, color=color.new(color.red, 30),
+              textcolor=color.white, size=labelSize, tooltip=bearDivTooltip)
+
+// buffer used by SL logic
+slBuf = xATR * 0.10
+
+// ATR for SL calculation (separate from UT Bot ATR)
+slATR = ta.atr(slAtrLen)
+atrPercent = close != 0 ? (slATR / close * 100) : 1.0
+
+// ----- SL calculators (LONG / SHORT) -----
+// Comprehensive multi-method SL calculation
+calcLongSL(_entry) =>
+    float sl = na
+    float tickValue = syminfo.mintick
+
+    if slMethod == "ATR"
+        // Standard ATR with user multiplier
+        sl := _entry - (slATR * slAtrMult)
+
+    else if slMethod == "% Based"
+        // Fixed percentage from entry
+        sl := _entry * (1 - slPctStop / 100)
+
+    else if slMethod == "Tick Based"
+        // Fixed number of ticks
+        sl := _entry - (slTickStop * tickValue)
+
+    else if slMethod == "Swing"
+        // Recent swing low
+        float swingFloor = ta.lowest(low, swingLen)
+        sl := not na(swingFloor) and swingFloor < _entry ? swingFloor : _entry - slATR * 1.5
+
+    else if slMethod == "Scaled ATR"
+        // Dynamic multiplier based on volatility %
+        float scaledMult = atrPercent > 5 ? 2.5 :
+                          atrPercent > 3 ? 2.0 :
+                          atrPercent > 1.5 ? 1.5 : 1.2
+        float atrDist = slATR * scaledMult
+        float minDist = _entry * 0.01  // Minimum 1% distance
+        sl := _entry - math.max(atrDist, minDist)
+
+    else if slMethod == "Smart Adaptive"
+        // Auto-adjusts to volatility level with minimum 1% floor
+        float smartMult = atrPercent > 3 ? 1.5 : atrPercent > 1.5 ? 1.0 : 0.7
+        float atrDist = slATR * smartMult
+        float minDist = _entry * 0.01  // Minimum 1% distance
+        sl := _entry - math.max(atrDist, minDist)
+
+    else if slMethod == "Safer"
+        // Widest of multiple methods (most conservative)
+        float atrSL = _entry - (slATR * slAtrMult)
+        float pctSL = _entry * (1 - slPctStop / 100)
+        float swingSL = ta.lowest(low, swingLen)
+        swingSL := na(swingSL) or swingSL >= _entry ? _entry - slATR * 2 : swingSL
+        sl := math.min(atrSL, math.min(pctSL, swingSL))
+
+    // Fallback if still na
+    sl := na(sl) ? _entry - slATR * 1.5 : sl
+    sl - slBuf
+
+calcShortSL(_entry) =>
+    float sl = na
+    float tickValue = syminfo.mintick
+
+    if slMethod == "ATR"
+        sl := _entry + (slATR * slAtrMult)
+
+    else if slMethod == "% Based"
+        sl := _entry * (1 + slPctStop / 100)
+
+    else if slMethod == "Tick Based"
+        sl := _entry + (slTickStop * tickValue)
+
+    else if slMethod == "Swing"
+        float swingCeil = ta.highest(high, swingLen)
+        sl := not na(swingCeil) and swingCeil > _entry ? swingCeil : _entry + slATR * 1.5
+
+    else if slMethod == "Scaled ATR"
+        float scaledMult = atrPercent > 5 ? 2.5 :
+                          atrPercent > 3 ? 2.0 :
+                          atrPercent > 1.5 ? 1.5 : 1.2
+        float atrDist = slATR * scaledMult
+        float minDist = _entry * 0.01  // Minimum 1% distance
+        sl := _entry + math.max(atrDist, minDist)
+
+    else if slMethod == "Smart Adaptive"
+        // Auto-adjusts to volatility level with minimum 1% floor
+        float smartMult = atrPercent > 3 ? 1.5 : atrPercent > 1.5 ? 1.0 : 0.7
+        float atrDist = slATR * smartMult
+        float minDist = _entry * 0.01  // Minimum 1% distance
+        sl := _entry + math.max(atrDist, minDist)
+
+    else if slMethod == "Safer"
+        float atrSL = _entry + (slATR * slAtrMult)
+        float pctSL = _entry * (1 + slPctStop / 100)
+        float swingSL = ta.highest(high, swingLen)
+        swingSL := na(swingSL) or swingSL <= _entry ? _entry + slATR * 2 : swingSL
+        sl := math.max(atrSL, math.max(pctSL, swingSL))
+
+    sl := na(sl) ? _entry + slATR * 1.5 : sl
+    sl + slBuf
+
+// --- Leg state (reset on every UT flip) ---
+var int   tradeDir   = na
+bool commitFlip = (utBuy or utSell) and barstate.isconfirmed
+
+// IMPORTANT: Check if previous trade's TP was hit BEFORE resetting on new signal
+// This fixes the bug where TP hit wasn't counted when a new signal fires on same bar
+// NOTE: TP check runs FIRST so wins take priority over losses (consistent with main logic)
+if commitFlip and not na(tradeDir) and statTradeOpen and not na(entryBar) and bar_index > entryBar
+    bool prevTpHit = false
+    if tradeDir == 1  // LONG trade - check if any TP was hit by HIGH
+        if tp1On  and not tp1Frozen  and not na(tp1Y)  and high >= tp1Y
+            prevTpHit := true
+        if tp15On and not tp15Frozen and not na(tp15Y) and high >= tp15Y
+            prevTpHit := true
+        if tp2On  and not tp2Frozen  and not na(tp2Y)  and high >= tp2Y
+            prevTpHit := true
+        if tp3On  and not tp3Frozen  and not na(tp3Y)  and high >= tp3Y
+            prevTpHit := true
+    else  // SHORT trade - check if any TP was hit by LOW
+        if tp1On  and not tp1Frozen  and not na(tp1Y)  and low <= tp1Y
+            prevTpHit := true
+        if tp15On and not tp15Frozen and not na(tp15Y) and low <= tp15Y
+            prevTpHit := true
+        if tp2On  and not tp2Frozen  and not na(tp2Y)  and low <= tp2Y
+            prevTpHit := true
+        if tp3On  and not tp3Frozen  and not na(tp3Y)  and low <= tp3Y
+            prevTpHit := true
+    if prevTpHit
+        statWins      += 1
+        int barsToTP   = bar_index - entryBar
+        statTotalBars += barsToTP
+        statWinBars   += 1
+        statTradeOpen := false
+
+// IMPORTANT: Check if previous trade's SL was hit BEFORE resetting on new signal
+// This fixes the bug where SL hit wasn't counted when a new opposite signal fires
+// NOTE: SL check runs AFTER TP check - if TP was hit, statTradeOpen is already false
+if commitFlip and not na(tradeDir) and not slFrozen and statTradeOpen and not na(slPrice)
+    float _tol = syminfo.mintick * 0.51
+    bool prevSlHit = (tradeDir == 1 ? low <= slPrice + _tol : high >= slPrice - _tol)
+    if prevSlHit
+        statLosses    += 1
+        statTradeOpen := false
+
+rtFlipAlerts = true  // Always enabled - alerts are core functionality
+var int lastFlipBar = na
+if rtFlipAlerts and commitFlip and lastFlipBar != bar_index
+    lastFlipBar := bar_index
+    string side = utBuy ? "BUY" : "SELL"
+    alert("UT FLIP " + side + " | " + syminfo.ticker + " " + timeframe.period + " | Close: " + str.tostring(close), alert.freq_once_per_bar_close)
+
+// --- build SL on UT flip ---
+var float entry = na
+if commitFlip
+    if not na(slLine)
+        line.delete(slLine), slLine := na
+    if not na(slLbl)
+        label.delete(slLbl), slLbl := na
+
+    // new state
+    slStartBar := bar_index
+    entry      := close
+    baseSl     := utBuy ? calcLongSL(entry) : calcShortSL(entry)
+
+    float extra = slExtraTicks * syminfo.mintick
+    slPrice    := utBuy ? (baseSl - extra) : (baseSl + extra)
+    slColor    := utBuy ? color.aqua : color.orange
+
+    // Sanity: keep SL on the correct side of entry (handles rare wrong-side floors)
+    float minFloor = xATR * 1.50 + slBuf + extra
+    if utBuy and slPrice >= entry
+        slPrice := entry - minFloor
+    if utSell and slPrice <= entry
+        slPrice := entry + minFloor
+        
+    // reset leg state + TP flags + SL frozen
+    legDone    := false
+    legDoneBar := na
+    slFrozen   := false  // CRITICAL: reset SL frozen flag for new trade
+    tp1Hit := false, tp15Hit := false, tp2Hit := false, tp3Hit := false
+
+    // Stats: new trade opened (only count if within lookback period)
+    bool inLookback = time >= timenow - i_statsLookback * 86400000
+    if inLookback
+        statTotalTrades += 1
+    statTradeOpen := inLookback
+
+    // establish trade direction and reset run trackers early
+    tradeDir   := utBuy ? 1 : -1
+
+    // initial render
+    if slShowVis
+        slLine := line.new(slStartBar, slPrice, slStartBar, slPrice, xloc=xloc.bar_index, extend=extend.none, color=slColor, width=2)
+        slLbl  := label.new(slStartBar, slPrice, "Suggested Stop Loss", xloc=xloc.bar_index, style=label.style_label_left, textcolor=color.white, color=slColor, size=labelSize)
+
+// helper flags for this bar
+bool inLegNow = not na(tradeDir)  
+int  dirNow   = na(tradeDir) ? 0 : tradeDir 
+
+// SL freeze-on-touch (final after all intrabar updates)
+// Guard bar_index > slStartBar: never count an SL hit on the entry bar itself - that
+// bar's low/high happened BEFORE entry (at the close), so it must not stop out the trade
+// before it starts. Stops are only checked from the bar AFTER entry (matches TP logic).
+if inLegNow and not slFrozen and not na(slPrice) and not na(slStartBar) and bar_index > slStartBar
+    float _tol = syminfo.mintick * 0.51
+    bool wickHit = (dirNow == 1 ? low <= slPrice + _tol : high >= slPrice - _tol)
+    if wickHit
+        slFrozen    := true
+        legDone     := true
+        legDoneBar  := bar_index
+        entryFrozen := true
+
+        // Stats: trade lost (SL hit)
+        if statTradeOpen
+            statLosses    += 1
+            statTradeOpen := false
+
+        // Only create SL objects if feature is enabled
+        if slFeatureOn
+            [slLine, slLbl] = ensureSLObjects(slLine, slLbl, slStartBar, slPrice, slColor)
+        int x2c_live = linesLimit10 ? math.min(bar_index, slStartBar + 10) : bar_index
+        int x2c      = capX2(x2c_live)
+        if slShowVis and not na(slLine)
+            line.set_x2(slLine, x2c)
+            line.set_y1(slLine, slPrice)
+            line.set_y2(slLine, slPrice)
+        if slShowVis and not na(slLbl)
+            label.set_x(slLbl, x2c)
+            label.set_text(slLbl, "SL Touched ❌")
+            label.set_style(slLbl, label.style_label_left)
+        if not na(entryLine) and not na(entryBar)
+            int xe_live = linesLimit10 ? math.min(bar_index, entryBar + 10) : bar_index
+            int xe_cap  = capX2(xe_live)
+            line.set_x2(entryLine, xe_cap)
+            if not na(entryLbl)
+                label.set_x(entryLbl, xe_cap)
+                label.set_style(entryLbl, label.style_label_left)
+        if not na(tp1Line)
+            line.set_x2(tp1Line, x2c)
+            if not tp1Frozen
+                tp1Frozen := true
+            if not na(tp1Lbl)
+                label.set_x(tp1Lbl, x2c)
+                label.set_style(tp1Lbl, label.style_label_left)
+        if not na(tp15Line)
+            line.set_x2(tp15Line, x2c)
+            if not tp15Frozen
+                tp15Frozen := true
+            if not na(tp15Lbl)
+                label.set_x(tp15Lbl, x2c)
+                label.set_style(tp15Lbl, label.style_label_left)
+        if not na(tp2Line)
+            line.set_x2(tp2Line, x2c)
+            if not tp2Frozen
+                tp2Frozen := true
+            if not na(tp2Lbl)
+                label.set_x(tp2Lbl, x2c)
+                label.set_style(tp2Lbl, label.style_label_left)
+        if not na(tp3Line)
+            line.set_x2(tp3Line, x2c)
+            if not tp3Frozen
+                tp3Frozen := true
+            if not na(tp3Lbl)
+                label.set_x(tp3Lbl, x2c)
+                label.set_style(tp3Lbl, label.style_label_left)
+
+// Label X offset: push SL/TP/Entry price tags a few bars RIGHT of the last bar so
+// they sit in the empty margin instead of overlapping the current candle. While the
+// leg is live they follow the last bar; once done they lock near the leg's end.
+int LBL_X_OFF = 3
+
+// freeze/cap X when SL is frozen or leg is done
+if slShowVis and not na(slLine) and (slFrozen or legDone)
+    int x2 = capX2(linesLimit10 ? math.min(bar_index, slStartBar + 10) : bar_index)
+    line.set_x2(slLine, x2)
+    if not na(slLbl)
+        label.set_x(slLbl, x2 + LBL_X_OFF)
+
+// maintain SL line/label (cap X2 on legDone; do not update Y when frozen/done)
+if not na(slLine) and not na(slStartBar)
+    int x2_any = linesLimit10 ? math.min(bar_index, slStartBar + 10) : bar_index
+    line.set_x1(slLine, slStartBar)
+    line.set_x2(slLine, capX2(x2_any))
+    if slShowVis and not (slFrozen or legDone) and not na(slPrice)
+        bool _sl_changed = na(slPrice[1]) or slPrice != slPrice[1]
+        if _sl_changed
+            line.set_y1(slLine, slPrice)
+            line.set_y2(slLine, slPrice)
+
+    if slShowVis and not na(slLbl)
+        label.set_x(slLbl, legDone ? capX2(x2_any) + LBL_X_OFF : bar_index + LBL_X_OFF)
+        if not (slFrozen or legDone) and not na(slPrice)
+            bool _sl_changed2 = na(slPrice[1]) or slPrice != slPrice[1]
+            if _sl_changed2
+                label.set_y(slLbl, slPrice)
+
+if not slFeatureOn
+    if not na(slLine)
+        line.delete(slLine), slLine := na
+    if not na(slLbl)
+        label.delete(slLbl), slLbl := na
+
+//======================================================
+//==================== TAKE PROFITS ====================
+//======================================================
+
+clearLine(line l) =>
+    if not na(l)
+        line.delete(l)
+    l
+clearLabel(label lb) =>
+    if not na(lb)
+        label.delete(lb)
+    lb
+
+// Helper: generate TP label text based on display mode (global function)
+getTpText(string _name, float _price, float _entry, bool _hit) =>
+    if tpDisplayMode == "Detailed" and not na(_price) and not na(_entry) and _entry != 0
+        float pctGain = ((_price - _entry) / _entry) * 100
+        string sign = pctGain >= 0 ? "+" : ""
+        _hit ? _name + " ✅\n" + str.tostring(_price, "$"+"#.##") + sign + str.tostring(pctGain, "#.#") + "%)" :
+               _name + "\n" + str.tostring(_price, "$"+"#.##") + sign + str.tostring(pctGain, "#.#") + "%)"
+    else
+        _hit ? _name + " ✅" : _name
+
+// Build new on UT flip
+if commitFlip and not na(baseSl)
+
+    // logic/state reset
+    clearLine(tp1Line),  tp1Line  := na
+    clearLine(tp15Line), tp15Line := na
+    clearLine(tp2Line),  tp2Line  := na
+    clearLine(tp3Line),  tp3Line  := na
+    clearLabel(tp1Lbl),  tp1Lbl := na
+    clearLabel(tp15Lbl), tp15Lbl := na
+    clearLabel(tp2Lbl),  tp2Lbl := na
+    clearLabel(tp3Lbl),  tp3Lbl := na
+    tp1Y := na, tp15Y := na, tp2Y := na, tp3Y := na
+    tp1Frozen := false, tp15Frozen := false, tp2Frozen := false, tp3Frozen := false
+
+    tpInitRisk := math.abs(entry - baseSl)
+    float _pad = 0.0
+    _col = slColor
+    int _x2 = bar_index
+
+    if utBuy
+        tp1Y  := tp1On  ? entry + tpInitRisk * TP1   + _pad : na
+        tp15Y := tp15On ? entry + tpInitRisk * TP1_5 + _pad : na
+        tp2Y  := tp2On  ? entry + tpInitRisk * TP2   + _pad : na
+        tp3Y  := tp3On  ? entry + tpInitRisk * TP3   + _pad : na
+    else
+        tp1Y  := tp1On  ? entry - tpInitRisk * TP1   - _pad : na
+        tp15Y := tp15On ? entry - tpInitRisk * TP1_5 - _pad : na
+        tp2Y  := tp2On  ? entry - tpInitRisk * TP2   - _pad : na
+        tp3Y  := tp3On  ? entry - tpInitRisk * TP3   - _pad : na
+
+    // render (include ✅ if a hit was already recorded)
+    if tpShowVis
+        if tp1On  and not na(tp1Y)
+            tp1Line := line.new(slStartBar, tp1Y, _x2, tp1Y, xloc=xloc.bar_index, extend=extend.none, color=_col, width=2)
+            tp1Lbl  := label.new(_x2, tp1Y, getTpText("TP1", tp1Y, entry, tp1Hit), xloc=xloc.bar_index, style=label.style_label_right, textcolor=color.white, color=_col, size=labelSize)
+        if tp15On and not na(tp15Y)
+            tp15Line := line.new(slStartBar, tp15Y, _x2, tp15Y, xloc=xloc.bar_index, extend=extend.none, color=_col, width=2)
+            tp15Lbl  := label.new(_x2, tp15Y, getTpText("TP1.5", tp15Y, entry, tp15Hit), xloc=xloc.bar_index, style=label.style_label_right, textcolor=color.white, color=_col, size=labelSize)
+        if tp2On  and not na(tp2Y)
+            tp2Line := line.new(slStartBar, tp2Y, _x2, tp2Y, xloc=xloc.bar_index, extend=extend.none, color=_col, width=2)
+            tp2Lbl  := label.new(_x2, tp2Y, getTpText("TP2", tp2Y, entry, tp2Hit), xloc=xloc.bar_index, style=label.style_label_right, textcolor=color.white, color=_col, size=labelSize)
+        if tp3On  and not na(tp3Y)
+            tp3Line := line.new(slStartBar, tp3Y, _x2, tp3Y, xloc=xloc.bar_index, extend=extend.none, color=_col, width=2)
+            tp3Lbl  := label.new(_x2, tp3Y, getTpText("TP3", tp3Y, entry, tp3Hit), xloc=xloc.bar_index, style=label.style_label_right, textcolor=color.white, color=_col, size=labelSize)
+
+// Single maintenance block (RENDER ONLY)
+int _x2bRaw = linesLimit10 and not na(slStartBar) ? math.min(bar_index, slStartBar + 10) : bar_index
+int _x2b    = capX2(_x2bRaw)
+// Label x: live leg follows the last bar's right margin; done leg locks near its end
+int _x2bLbl = legDone ? _x2b + LBL_X_OFF : bar_index + LBL_X_OFF
+
+// TP1
+if not na(tp1Line)
+    line.set_x2(tp1Line, _x2b)
+    if tpShowVis and not (legDone or tp1Frozen) and not na(tp1Y)
+        line.set_y1(tp1Line, tp1Y), line.set_y2(tp1Line, tp1Y)
+    if tpShowVis and not na(tp1Lbl)
+        label.set_x(tp1Lbl, _x2bLbl)
+        if not (legDone or tp1Frozen) and not na(tp1Y)
+            label.set_y(tp1Lbl, tp1Y)
+        label.set_style(tp1Lbl, label.style_label_left)
+
+// TP1.5
+if not na(tp15Line)
+    line.set_x2(tp15Line, _x2b)
+    if tpShowVis and not (legDone or tp15Frozen) and not na(tp15Y)
+        line.set_y1(tp15Line, tp15Y), line.set_y2(tp15Line, tp15Y)
+    if tpShowVis and not na(tp15Lbl)
+        label.set_x(tp15Lbl, _x2bLbl)
+        if not (legDone or tp15Frozen) and not na(tp15Y)
+            label.set_y(tp15Lbl, tp15Y)
+        label.set_style(tp15Lbl, label.style_label_left)
+
+// TP2
+if not na(tp2Line)
+    line.set_x2(tp2Line, _x2b)
+    if tpShowVis and not (legDone or tp2Frozen) and not na(tp2Y)
+        line.set_y1(tp2Line, tp2Y), line.set_y2(tp2Line, tp2Y)
+    if tpShowVis and not na(tp2Lbl)
+        label.set_x(tp2Lbl, _x2bLbl)
+        if not (legDone or tp2Frozen) and not na(tp2Y)
+            label.set_y(tp2Lbl, tp2Y)
+        label.set_style(tp2Lbl, label.style_label_left)
+
+// TP3
+if not na(tp3Line)
+    line.set_x2(tp3Line, _x2b)
+    if tpShowVis and not (legDone or tp3Frozen) and not na(tp3Y)
+        line.set_y1(tp3Line, tp3Y), line.set_y2(tp3Line, tp3Y)
+    if tpShowVis and not na(tp3Lbl)
+        label.set_x(tp3Lbl, _x2bLbl)
+        if not (legDone or tp3Frozen) and not na(tp3Y)
+            label.set_y(tp3Lbl, tp3Y)
+        label.set_style(tp3Lbl, label.style_label_left)
+
+// --- TP freeze-on-touch (keeps working even when lines limited to 10 bars) ---
+// Note: added 'not commitFlip' to prevent false triggers on signal bar (entryBar still old)
+if tpFreezeOnTouch and not legDone and not commitFlip and (not na(entryBar) and bar_index > entryBar)
+    if tp1On  and not tp1Frozen  and not na(tp1Y)  and ((tradeDir == 1 and high >= tp1Y) or (tradeDir == -1 and low <= tp1Y))
+        tp1Frozen := true, tp1Hit := true
+        // Stats: count WIN when TP1 is hit (first target)
+        if statTradeOpen and not na(entryBar)
+            statWins      += 1
+            int barsToTP   = bar_index - entryBar
+            statTotalBars += barsToTP
+            statWinBars   += 1
+            statTradeOpen := false
+        if tpFeatureOn and not na(tp1Lbl)
+            label.set_text(tp1Lbl, getTpText("TP1", tp1Y, entryPx, true)), label.set_style(tp1Lbl, label.style_label_left)
+
+    if tp15On and not tp15Frozen and not na(tp15Y) and ((tradeDir == 1 and high >= tp15Y) or (tradeDir == -1 and low <= tp15Y))
+        tp15Frozen := true, tp15Hit := true
+        // Stats: count WIN if this is the first TP hit (TP1 was off or not hit yet)
+        if statTradeOpen and not na(entryBar)
+            statWins      += 1
+            int barsToTP   = bar_index - entryBar
+            statTotalBars += barsToTP
+            statWinBars   += 1
+            statTradeOpen := false
+        if tpFeatureOn and not na(tp15Lbl)
+            label.set_text(tp15Lbl, getTpText("TP1.5", tp15Y, entryPx, true)), label.set_style(tp15Lbl, label.style_label_left)
+
+    if tp2On  and not tp2Frozen  and not na(tp2Y)  and ((tradeDir == 1 and high >= tp2Y) or (tradeDir == -1 and low <= tp2Y))
+        tp2Frozen := true, tp2Hit := true
+        // Stats: count WIN if this is the first TP hit
+        if statTradeOpen and not na(entryBar)
+            statWins      += 1
+            int barsToTP   = bar_index - entryBar
+            statTotalBars += barsToTP
+            statWinBars   += 1
+            statTradeOpen := false
+        if tpFeatureOn and not na(tp2Lbl)
+            label.set_text(tp2Lbl, getTpText("TP2", tp2Y, entryPx, true)), label.set_style(tp2Lbl, label.style_label_left)
+
+    if tp3On  and not tp3Frozen  and not na(tp3Y)  and ((tradeDir == 1 and high >= tp3Y) or (tradeDir == -1 and low <= tp3Y))
+        tp3Frozen := true, tp3Hit := true
+        // Stats: count WIN if this is the first TP hit
+        if statTradeOpen and not na(entryBar)
+            statWins      += 1
+            int barsToTP   = bar_index - entryBar
+            statTotalBars += barsToTP
+            statWinBars   += 1
+            statTradeOpen := false
+        if tpFeatureOn and not na(tp3Lbl)
+            label.set_text(tp3Lbl, getTpText("TP3", tp3Y, entryPx, true)), label.set_style(tp3Lbl, label.style_label_left)
+
+// --- close the leg when the farthest enabled TP is touched (unified) ---
+float farTP = na
+
+// compute farthest TP level in the active direction
+if tradeDir == 1
+    if tp1On  and not na(tp1Y)
+        farTP := na(farTP) ? tp1Y  : math.max(farTP, tp1Y)
+    if tp15On and not na(tp15Y)
+        farTP := na(farTP) ? tp15Y : math.max(farTP, tp15Y)
+    if tp2On  and not na(tp2Y)
+        farTP := na(farTP) ? tp2Y  : math.max(farTP, tp2Y)
+    if tp3On  and not na(tp3Y)
+        farTP := na(farTP) ? tp3Y  : math.max(farTP, tp3Y)
+else if tradeDir == -1
+    if tp1On  and not na(tp1Y)
+        farTP := na(farTP) ? tp1Y  : math.min(farTP, tp1Y)
+    if tp15On and not na(tp15Y)
+        farTP := na(farTP) ? tp15Y : math.min(farTP, tp15Y)
+    if tp2On  and not na(tp2Y)
+        farTP := na(farTP) ? tp2Y  : math.min(farTP, tp2Y)
+    if tp3On  and not na(tp3Y)
+        farTP := na(farTP) ? tp3Y  : math.min(farTP, tp3Y)
+
+// unified detection & handling (symmetric time rule: require bar after entry)
+// Note: added 'not commitFlip' to prevent false triggers on signal bar
+bool canCheckFar = not na(entryBar) and bar_index > entryBar and not na(farTP) and not legDone and not commitFlip
+bool touchedFar  = canCheckFar and ((tradeDir == 1 and high >= farTP) or (tradeDir == -1 and low <= farTP))
+
+if touchedFar
+    // mark all closer/equal TPs as hit/frozen (ensures TP1/TP2 get ✅ when TP3 is hit directly)
+    if tradeDir == 1
+        if tp1On  and not tp1Frozen  and not na(tp1Y)  and tp1Y  <= farTP
+            tp1Frozen := true, tp1Hit := true
+            if tpFeatureOn and not na(tp1Lbl)
+                label.set_text(tp1Lbl, getTpText("TP1", tp1Y, entryPx, true)), label.set_style(tp1Lbl, label.style_label_left)
+        if tp15On and not tp15Frozen and not na(tp15Y) and tp15Y <= farTP
+            tp15Frozen := true, tp15Hit := true
+            if tpFeatureOn and not na(tp15Lbl)
+                label.set_text(tp15Lbl, getTpText("TP1.5", tp15Y, entryPx, true)), label.set_style(tp15Lbl, label.style_label_left)
+        if tp2On  and not tp2Frozen  and not na(tp2Y)  and tp2Y  <= farTP
+            tp2Frozen := true, tp2Hit := true
+            if tpFeatureOn and not na(tp2Lbl)
+                label.set_text(tp2Lbl, getTpText("TP2", tp2Y, entryPx, true)), label.set_style(tp2Lbl, label.style_label_left)
+        if tp3On  and not tp3Frozen  and not na(tp3Y)  and tp3Y  <= farTP
+            tp3Frozen := true, tp3Hit := true
+            if tpFeatureOn and not na(tp3Lbl)
+                label.set_text(tp3Lbl, getTpText("TP3", tp3Y, entryPx, true)), label.set_style(tp3Lbl, label.style_label_left)
+    else
+        if tp1On  and not tp1Frozen  and not na(tp1Y)  and tp1Y  >= farTP
+            tp1Frozen := true, tp1Hit := true
+            if tpFeatureOn and not na(tp1Lbl)
+                label.set_text(tp1Lbl, getTpText("TP1", tp1Y, entryPx, true)), label.set_style(tp1Lbl, label.style_label_left)
+        if tp15On and not tp15Frozen and not na(tp15Y) and tp15Y >= farTP
+            tp15Frozen := true, tp15Hit := true
+            if tpFeatureOn and not na(tp15Lbl)
+                label.set_text(tp15Lbl, getTpText("TP1.5", tp15Y, entryPx, true)), label.set_style(tp15Lbl, label.style_label_left)
+        if tp2On  and not tp2Frozen  and not na(tp2Y)  and tp2Y  >= farTP
+            tp2Frozen := true, tp2Hit := true
+            if tpFeatureOn and not na(tp2Lbl)
+                label.set_text(tp2Lbl, getTpText("TP2", tp2Y, entryPx, true)), label.set_style(tp2Lbl, label.style_label_left)
+        if tp3On  and not tp3Frozen  and not na(tp3Y)  and tp3Y  >= farTP
+            tp3Frozen := true, tp3Hit := true
+            if tpFeatureOn and not na(tp3Lbl)
+                label.set_text(tp3Lbl, getTpText("TP3", tp3Y, entryPx, true)), label.set_style(tp3Lbl, label.style_label_left)
+
+    // freeze SL/ENTRY and end leg
+    legDone     := true
+    legDoneBar  := bar_index
+    slFrozen    := true
+    entryFrozen := true
+
+    // lock ENTRY X at freeze bar (respect 10-bar limit)
+    if not na(entryLine) and not na(entryBar)
+        bool limit10 = linesLimit10
+        int  x2f = limit10 ? math.min(bar_index, entryBar + 10) : bar_index
+        line.set_x2(entryLine, x2f)
+        if not na(entryLbl)
+            label.set_x(entryLbl, x2f)
+
+    // update SL label text
+    if slFeatureOn and not na(slLbl)
+        label.set_text(slLbl, "SL Frozen"), label.set_style(slLbl, label.style_label_left)
+
+// capture entry state on flip (logic always)
+if commitFlip
+    if not na(entryLine)
+        line.delete(entryLine), entryLine := na
+    if not na(entryLbl)
+        label.delete(entryLbl), entryLbl := na
+    entryPx  := close
+    entryBar := bar_index
+    entryCol := slColor
+    entryFrozen := false
+
+    // create immediately when feature is ON (independent of utVizGate)
+    if entryFeatureOn
+        entryLine := line.new(entryBar, entryPx, entryBar, entryPx,
+                              xloc=xloc.bar_index, extend=extend.none, color=color.navy, width=2)
+        entryLbl  := label.new(entryBar, entryPx, "ENTRY",
+                               xloc=xloc.bar_index, style=label.style_label_right,
+                               textcolor=color.white, color=color.navy, size=labelSize)
+
+// render (gated)
+if not na(entryLine) and not na(entryBar) and not na(entryPx)
+    bool limit10  = linesLimit10
+    int  x2_live  = limit10 ? math.min(bar_index, entryBar + 10) : bar_index
+    int  x2_frozen = not na(legDoneBar) ? (limit10 ? math.min(legDoneBar, entryBar + 10) : legDoneBar) : x2_live
+    int  x2_final  = (entryFrozen or legDone) ? x2_frozen : x2_live
+    line.set_x2(entryLine, x2_final)
+    if entryShowVis and not (entryFrozen or legDone)
+        line.set_x1(entryLine, entryBar)
+        line.set_y1(entryLine, entryPx)
+        line.set_y2(entryLine, entryPx)
+    if entryShowVis
+        if na(entryLbl)
+            entryLbl := label.new(entryBar, entryPx, "ENTRY",
+                                  xloc=xloc.bar_index, style=label.style_label_right,
+                                  textcolor=color.white, color=entryCol, size=labelSize)
+        if not (entryFrozen or legDone)
+            label.set_y(entryLbl, entryPx)
+        label.set_x(entryLbl, (entryFrozen or legDone) ? x2_final + LBL_X_OFF : bar_index + LBL_X_OFF)
+        label.set_style(entryLbl, label.style_label_left)
+        label.set_text(entryLbl, "ENTRY")
+else
+    if not entryShow and not na(entryLine)
+        line.delete(entryLine), entryLine := na
+    if not entryShow and not na(entryLbl)
+        label.delete(entryLbl), entryLbl := na
+
+//======================================================
+//======================= ALERTS =======================
+//======================================================
+// Gate alert conditions with barstate.isconfirmed so they fire ONLY at bar close -
+// matching the (anti-repaint) chart labels. Without this, an alert set to "Once Per Bar"
+// fires intrabar, before the label appears, and can fire on a flip that doesn't hold at
+// close (previous SL/TP still shown). Now alert + label are always in sync.
+utBuyBar  = utBuy  and barstate.isconfirmed
+utSellBar = utSell and barstate.isconfirmed
+alertcondition(utBuyBar,  title="✅Momentum Buy Signal✅",  message="✅Momentum Buy Signal✅  | {{ticker}} {{interval}} | Close: {{close}}")
+alertcondition(utSellBar, title="❌Momentum Sell Signal❌", message="❌Momentum Sell Signal❌ | {{ticker}} {{interval}} | Close: {{close}}")
+
+// Dynamic alerts - work with "Any alert() function call" in TradingView
+// Note: alertcondition() only creates selectable alert types, but doesn't fire on "Any alert()"
+// These dynamic calls ensure alerts work regardless of user's alert setup choice
+if utBuyBar and barstate.isconfirmed
+    alert("✅Momentum Buy Signal✅  | " + syminfo.ticker + " " + timeframe.period + " | Close: " + str.tostring(close), alert.freq_once_per_bar_close)
+
+if utSellBar and barstate.isconfirmed
+    alert("❌Momentum Sell Signal❌ | " + syminfo.ticker + " " + timeframe.period + " | Close: " + str.tostring(close), alert.freq_once_per_bar_close)
+
+//======================================================
+//=================== STATUS TABLE =====================
+//======================================================
+
+// Table position
+tablePos = switch i_tablePos
+    "Top Left"     => position.top_left
+    "Top Right"    => position.top_right
+    "Bottom Left"  => position.bottom_left
+    "Bottom Right" => position.bottom_right
+    => position.top_right
+
+// Table size
+tableSize = switch i_tableSize
+    "Tiny"   => size.tiny
+    "Small"  => size.small
+    "Normal" => size.normal
+    "Large"  => size.large
+    => size.small
+
+// Colors
+color tblBg      = color.new(#1a1a2e, 5)
+color tblBorder  = color.new(#4a4a6a, 20)
+color txtWhite   = color.white
+color colGreen   = #00d4aa
+color colRed     = #ff6b6b
+color colYellow  = #ffd93d
+
+// Calculate current values for display
+[_diplus, _diminus, _adxVal] = ta.dmi(i_adxPeriod, i_adxPeriod)
+float _rsiVal = ta.rsi(close, i_rsiLen)
+float _volSma = ta.sma(volume, i_volSmaLen)
+float _volRatio = _volSma > 0 ? volume / _volSma : 1.0
+
+// Filter status checks (for display - recalculate to show current state)
+bool _regimePass   = i_enableLayer1 ? _adxVal >= i_adxThreshold : true
+bool _cooldownPass = l1_cooldownOk
+bool _volumePass   = i_useVolFilter ? _volRatio >= i_volThreshold : true
+bool _rsiPassBuy   = i_useRsiFilter ? _rsiVal < i_rsiOB : true
+bool _rsiPassSell  = i_useRsiFilter ? _rsiVal > i_rsiOS : true
+bool _swingPassBuy = swingOkBuy
+bool _swingPassSell= swingOkSell
+
+// Signal state
+string sigState = barbuy ? "BULLISH" : barsell ? "BEARISH" : "NEUTRAL"
+string sigEmoji = barbuy ? "🟢" : barsell ? "🔴" : "⚪"
+color  sigColor = barbuy ? colGreen : barsell ? colRed : txtWhite
+
+// Asset type icon and color
+string assetIcon = switch detectedAsset
+    ASSET_CRYPTO  => "₿"
+    ASSET_FOREX   => "💱"
+    ASSET_FUTURES => "📈"
+    ASSET_INDEX   => "📉"
+    ASSET_FUND    => "🏦"
+    ASSET_CFD     => "📄"
+    ASSET_BOND    => "🔒"
+    ASSET_STOCK   => "📊"
+    => "📊"
+color assetCol = switch detectedAsset
+    ASSET_CRYPTO  => color.new(#f7931a, 0)
+    ASSET_FOREX   => color.new(#4caf50, 0)
+    ASSET_FUTURES => color.new(#2196f3, 0)
+    ASSET_INDEX   => color.new(#9c27b0, 0)
+    ASSET_FUND    => color.new(#00bcd4, 0)
+    ASSET_CFD     => color.new(#ff9800, 0)
+    ASSET_BOND    => color.new(#607d8b, 0)
+    => txtWhite
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONFIDENCE SCORE CALCULATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Progress bar function (10 blocks)
+get_progress_bar(float pct) =>
+    int filled = math.round(pct / 10)
+    string bar = ""
+    for i = 0 to 9
+        bar := bar + (i < filled ? "█" : "░")
+    bar
+
+// (Confidence score is computed earlier, before the Buy/Sell labels, so the % can be
+// printed on the signal itself. conf_* and confidenceScore are globals from that block.)
+
+// Progress bar and display
+string confidenceBar = get_progress_bar(confidenceScore)
+color confidenceColor = confidenceScore >= 80 ? color.green : confidenceScore >= 60 ? color.lime : confidenceScore >= 40 ? color.orange : color.red
+string confidenceEmoji = confidenceScore >= 80 ? "🔥" : confidenceScore >= 60 ? "🟢" : confidenceScore >= 40 ? "⚖️" : confidenceScore >= 20 ? "⚠️" : "❌"
+
+// S/R Zone boxes (drawn once on the last bar, same as the table - cheap, no per-bar redraw)
+if utShowZones and barstate.islast
+    if array.size(zoneResBoxes) > 0
+        for i = 0 to array.size(zoneResBoxes) - 1
+            box.delete(array.get(zoneResBoxes, i))
+    array.clear(zoneResBoxes)
+    if array.size(zoneResLabels) > 0
+        for i = 0 to array.size(zoneResLabels) - 1
+            label.delete(array.get(zoneResLabels, i))
+    array.clear(zoneResLabels)
+    if array.size(zoneSupBoxes) > 0
+        for i = 0 to array.size(zoneSupBoxes) - 1
+            box.delete(array.get(zoneSupBoxes, i))
+    array.clear(zoneSupBoxes)
+    if array.size(zoneSupLabels) > 0
+        for i = 0 to array.size(zoneSupLabels) - 1
+            label.delete(array.get(zoneSupLabels, i))
+    array.clear(zoneSupLabels)
+
+    // Draw ONLY the single most-relevant zone on each side (nearest to price) - the
+    // others are tracked for the filter but drawing all 3+3 just clutters the chart.
+    int resIdx = nearestZoneIdx(zoneResPrice, close, true)
+    if resIdx >= 0
+        float zPrice = array.get(zoneResPrice, resIdx)
+        int zStart = array.get(zoneResStartBar, resIdx)
+        int zTouch = array.get(zoneResTouch, resIdx)
+        box b = box.new(zStart, zPrice + zoneTol, bar_index + 20, zPrice - zoneTol, bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 40), border_width=1)
+        array.push(zoneResBoxes, b)
+        string resTooltip = "Resistance Zone (nearest)\n\nPrice: " + str.tostring(zPrice, format.mintick) + "\nTouches: " + str.tostring(zTouch) + " (pivot highs clustered here)\nZone width: ±" + str.tostring(zoneTol, "#.##") + " (" + str.tostring(i_zoneWidthMult, "0.0") + "× ATR)\n\n" + (i_useZoneFilter ? "FILTER ON: blocks BUY while price is inside this zone" : "Display only (Zone Filter is OFF)")
+        label resLbl = label.new(bar_index + 20, zPrice, "R " + str.tostring(zPrice, format.mintick) + " (" + str.tostring(zTouch) + "×)", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small, tooltip=resTooltip)
+        array.push(zoneResLabels, resLbl)
+
+    int supIdx = nearestZoneIdx(zoneSupPrice, close, false)
+    if supIdx >= 0
+        float zPrice = array.get(zoneSupPrice, supIdx)
+        int zStart = array.get(zoneSupStartBar, supIdx)
+        int zTouch = array.get(zoneSupTouch, supIdx)
+        box b = box.new(zStart, zPrice + zoneTol, bar_index + 20, zPrice - zoneTol, bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 40), border_width=1)
+        array.push(zoneSupBoxes, b)
+        string supTooltip = "Support Zone (nearest)\n\nPrice: " + str.tostring(zPrice, format.mintick) + "\nTouches: " + str.tostring(zTouch) + " (pivot lows clustered here)\nZone width: ±" + str.tostring(zoneTol, "#.##") + " (" + str.tostring(i_zoneWidthMult, "0.0") + "× ATR)\n\n" + (i_useZoneFilter ? "FILTER ON: blocks SELL while price is inside this zone" : "Display only (Zone Filter is OFF)")
+        label supLbl = label.new(bar_index + 20, zPrice, "S " + str.tostring(zPrice, format.mintick) + " (" + str.tostring(zTouch) + "×)", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small, tooltip=supTooltip)
+        array.push(zoneSupLabels, supLbl)
+
+// Build table
+var table statusTbl = na
+color colNavy = color.new(#000080, 0)
+
+if i_showTable and barstate.islast
+    // Delete old table
+    if not na(statusTbl)
+        table.delete(statusTbl)
+
+    // Create new table (3 columns, dynamic rows)
+    statusTbl := table.new(tablePos, 3, 25, bgcolor=tblBg, border_width=1, border_color=tblBorder, frame_width=2, frame_color=tblBorder)
+
+    int row = 0
+
+    // Row 0: Header (Navy background, merged, yellow text)
+    string hdrStyle = i_classicUT ? "Classic UT-Bot" : i_preset == "Auto (from TF)" ? effStyle + " (Auto)" : i_preset == "Custom (manual)" ? "Custom" : effStyle
+    table.cell(statusTbl, 0, row, "UT GOD MODE · " + hdrStyle, text_color=colYellow, text_size=tableSize, text_halign=text.align_center, bgcolor=colNavy, tooltip="Active Trading Style: " + hdrStyle + "\nSensitivity(Key): " + str.tostring(effKey, "0.0") + " | ATR: " + str.tostring(effAtr) + " | Chop: " + str.tostring(effChop, "0.0"))
+    table.cell(statusTbl, 1, row, "", bgcolor=colNavy)
+    table.cell(statusTbl, 2, row, "", bgcolor=colNavy)
+    table.merge_cells(statusTbl, 0, row, 2, row)
+    row += 1
+
+    // Row 1: Ticker | Asset Type (Navy background, yellow text)
+    table.cell(statusTbl, 0, row, "Asset: " + syminfo.ticker, text_color=colYellow, text_size=tableSize, text_halign=text.align_left, bgcolor=colNavy,
+               tooltip="Symbol: " + syminfo.ticker + "\nExchange: " + syminfo.prefix)
+    table.cell(statusTbl, 1, row, detectedAsset + " (" + str.tostring(assetMult, "0.0") + "×)", text_color=colYellow, text_size=tableSize, text_halign=text.align_left, bgcolor=colNavy,
+               tooltip="Asset: " + detectedAsset + "\nMultiplier: " + str.tostring(assetMult, "0.0") + "×\n\nMULTIPLIERS BY TYPE:\n• Crypto: 1.5× (high volatility)\n• Futures: 1.2× (moderate)\n• Stock: 1.0× (standard)\n• CFD: 1.0× (mirrors underlying)\n• Index: 0.9× (diversified)\n• Fund/ETF: 0.9× (diversified)\n• Forex: 0.8× (low volatility)\n• Bond: 0.5× (very stable)\n\nYou can override auto-detection in settings")
+    table.cell(statusTbl, 2, row, assetIcon, text_color=colYellow, text_size=tableSize, text_halign=text.align_center, bgcolor=colNavy)
+    row += 1
+
+    // Row 2: Confidence Score with Progress Bar
+    string confPctDisplay = str.tostring(confidenceScore, "#") + "%"
+    string confVolStatus = _volRatio >= 2.0 ? "🔥" : _volRatio >= 1.5 ? "✅" : _volRatio >= 1.0 ? "🟡" : "❌"
+    string confDivStatus = conf_div_aligned ? "✅" : conf_div_opposed ? "❌" : "➖"
+    string confTooltip = "🎯 CONFIDENCE SCORE\n\nWeighted combination of all engines:\n\n" +
+                         "• UT Bot Direction: " + str.tostring(conf_ut_score, "#") + "/26\n" +
+                         "• SuperTrend: " + str.tostring(conf_st_score, "#.#") + "/21 " + (conf_st_aligned ? "✅" : "❌") + "\n" +
+                         "• Structure: " + str.tostring(conf_sb_score, "#.#") + "/18 " + (conf_sb_aligned ? "✅" : "❌") + "\n" +
+                         "• ADX Regime: " + str.tostring(conf_adx_score, "#") + "/13 " + (l1_regimeOk ? "✅" : "❌") + "\n" +
+                         "• MTF Align: " + str.tostring(conf_mtf_score, "#") + "/8 " + (conf_mtf_aligned ? "✅" : "❌") + "\n" +
+                         "• Volume: " + str.tostring(conf_vol_score, "#") + "/10 " + confVolStatus + " (" + str.tostring(_volRatio, "0.0") + "×)\n\n" +
+                         "• Divergence: " + str.tostring(conf_div_score, "#") + "/4 " + confDivStatus + " (" + lastDivType + ")\n\n" +
+                         "TOTAL: " + str.tostring(confidenceScore, "#") + "/100\n\n" +
+                         "🔥 80+ = Strong signal\n🟢 60+ = Good\n⚖️ 40+ = Weak\n⚠️ <40 = Very weak"
+    table.cell(statusTbl, 0, row, "🎯 Confidence", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Overall signal confidence based on engine alignment")
+    table.cell(statusTbl, 1, row, confidenceBar + " " + confPctDisplay, text_color=confidenceColor, text_size=tableSize, text_halign=text.align_center,
+               tooltip=confTooltip)
+    table.cell(statusTbl, 2, row, confidenceEmoji, text_color=color.white, text_size=tableSize, text_halign=text.align_center,
+               tooltip=confTooltip)
+    row += 1
+
+    // Row 3: Adaptive Mode
+    string adaptIcon = i_adaptiveMode == ADAPT_FIXED ? "📊" : i_adaptiveMode == ADAPT_DYNAMIC ? "🔄" : "⚡"
+    color  adaptCol  = i_adaptiveMode == ADAPT_FIXED ? txtWhite : i_adaptiveMode == ADAPT_DYNAMIC ? colGreen : colYellow
+    table.cell(statusTbl, 0, row, "Adaptive", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Adaptive Mode\nHow Key Value auto-adjusts to volatility\n• Fixed: No adjustment\n• Dynamic: Moderate (±15%)\n• Aggressive: Wide (±30%)")
+    table.cell(statusTbl, 1, row, i_adaptiveMode + " (" + str.tostring(adaptiveMult, "0.00") + "×)", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Mode: " + i_adaptiveMode + "\nCurrent multiplier: " + str.tostring(adaptiveMult, "0.00") + "×\nVolatility ratio: " + str.tostring(volatilityRatio, "0.00") + "×\n\n• Fixed: Always 1.0×\n• Dynamic:\n  - Low vol (<0.8): 0.85×\n  - Normal: 1.0×\n  - High vol (>1.2): 1.15×\n• Aggressive:\n  - Low vol: 0.7×\n  - High vol: 1.3×")
+    table.cell(statusTbl, 2, row, adaptIcon, text_color=adaptCol, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // Row 3: Signal Status
+    table.cell(statusTbl, 0, row, "Signal", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Current trend direction based on UT Bot\n• 🟢 BULLISH: Price above trailing stop\n• 🔴 BEARISH: Price below trailing stop")
+    table.cell(statusTbl, 1, row, sigState, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left)
+    table.cell(statusTbl, 2, row, sigEmoji, text_color=sigColor, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // Statistics Row (always show - after Signal Status)
+    // Win rate = wins / total trades (not wins / (wins + losses))
+    float winRate = statTotalTrades > 0 ? (statWins / float(statTotalTrades)) * 100 : 0.0
+    float avgBars = statWinBars > 0 ? statTotalBars / float(statWinBars) : 0.0
+    color statCol = statTotalTrades == 0 ? txtWhite : winRate >= 50 ? colGreen : winRate >= 30 ? colYellow : colRed
+    string statEmoji = statTotalTrades == 0 ? "📊" : winRate >= 50 ? "📈" : winRate >= 30 ? "📊" : "📉"
+    string statsLabel = "Stats (" + str.tostring(i_statsLookback) + "d)"
+    string statsValue = statTotalTrades == 0 ? "No trades" : str.tostring(winRate, "0.0") + "% | " + str.tostring(avgBars, "0.0") + " bars"
+
+    table.cell(statusTbl, 0, row, statsLabel, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Trade Statistics (Last " + str.tostring(i_statsLookback) + " days)\n\nWin Rate: TP1 hit before SL\nAvg Bars: Average bars to reach TP1")
+    table.cell(statusTbl, 1, row, statsValue, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="STATISTICS (Last " + str.tostring(i_statsLookback) + " days):\n\nTotal Trades: " + str.tostring(statTotalTrades) + "\nWins (TP1): " + str.tostring(statWins) + "\nLosses (SL): " + str.tostring(statLosses) + "\n\nWin Rate: " + str.tostring(winRate, "0.0") + "%\nAvg Bars to TP1: " + str.tostring(avgBars, "0.0"))
+    table.cell(statusTbl, 2, row, statEmoji, text_color=statCol, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // MTF Row (always show - displays all higher timeframe trends)
+    string mtfEmojis = ""
+    string mtfTooltip = "HIGHER TIMEFRAME TRENDS:\n(EMA 9/21 crossover)\n\n"
+
+    // Only show TFs higher than current (currentTFMins defined in Layer 3)
+    if currentTFMins < 5
+        mtfEmojis := mtfEmojis + trendEmoji(htf5mTrend)
+        mtfTooltip := mtfTooltip + "5 m = " + trendEmoji(htf5mTrend) + " " + trendStr(htf5mTrend) + "\n"
+    if currentTFMins < 15
+        mtfEmojis := mtfEmojis + trendEmoji(htf15mTrend)
+        mtfTooltip := mtfTooltip + "15m = " + trendEmoji(htf15mTrend) + " " + trendStr(htf15mTrend) + "\n"
+    if currentTFMins < 30
+        mtfEmojis := mtfEmojis + trendEmoji(htf30mTrend)
+        mtfTooltip := mtfTooltip + "30m = " + trendEmoji(htf30mTrend) + " " + trendStr(htf30mTrend) + "\n"
+    if currentTFMins < 60
+        mtfEmojis := mtfEmojis + trendEmoji(htf1hTrend)
+        mtfTooltip := mtfTooltip + "1 H = " + trendEmoji(htf1hTrend) + " " + trendStr(htf1hTrend) + "\n"
+    if currentTFMins < 240
+        mtfEmojis := mtfEmojis + trendEmoji(htf4hTrend)
+        mtfTooltip := mtfTooltip + "4 H = " + trendEmoji(htf4hTrend) + " " + trendStr(htf4hTrend) + "\n"
+    if currentTFMins < 1440
+        mtfEmojis := mtfEmojis + trendEmoji(htfDTrend)
+        mtfTooltip := mtfTooltip + "Day = " + trendEmoji(htfDTrend) + " " + trendStr(htfDTrend) + "\n"
+    if currentTFMins < 10080
+        mtfEmojis := mtfEmojis + trendEmoji(htfWTrend)
+        mtfTooltip := mtfTooltip + "Wk  = " + trendEmoji(htfWTrend) + " " + trendStr(htfWTrend) + "\n"
+
+    // Add filter status if MTF filter is enabled
+    bool mtfAligned = barbuy ? (htfTrend >= 0) : barsell ? (htfTrend <= 0) : true
+    string filterTF = i_mtfTimeframe == MTF_AUTO ? "Auto (" + htfTimeframe + ")" : i_mtfTimeframe
+    if i_useMTF
+        mtfTooltip := mtfTooltip + "\n───────────────\nFILTER: ON (" + filterTF + ")\nStatus: " + (mtfAligned ? "✅ Signal allowed" : "❌ Signal blocked")
+    else
+        mtfTooltip := mtfTooltip + "\n───────────────\nFILTER: OFF (display only)"
+
+    // MTF summary emoji: if filter ON show alignment, if OFF show selected HTF trend
+    string mtfSummaryEmoji = i_useMTF ? (mtfAligned ? "✅" : "❌") : trendEmoji(htfTrend)
+    color  mtfSummaryCol   = i_useMTF ? (mtfAligned ? colGreen : colRed) : (htfTrend == 1 ? colGreen : htfTrend == -1 ? colRed : txtWhite)
+
+    table.cell(statusTbl, 0, row, "Multi TF", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Multi-Timeframe Trends\n\nEmoji row (left to right):\nLow TF → High TF\n\n🟢 = BULL (uptrend)\n🔴 = BEAR (downtrend)\n⚪ = NEUTRAL\n\nFilter: " + (i_useMTF ? "ON" : "OFF"))
+    table.cell(statusTbl, 1, row, mtfEmojis, text_color=txtWhite, text_size=tableSize, text_halign=text.align_center,
+               tooltip=mtfTooltip)
+    table.cell(statusTbl, 2, row, mtfSummaryEmoji, text_color=mtfSummaryCol, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // Divergence Row (always show)
+    string divStatus = lastDivType == "BULL" ? "BULL ↗" : lastDivType == "BEAR" ? "BEAR ↘" : "None"
+    string divBarsAgo = barsSinceDiv < 999 ? str.tostring(barsSinceDiv) + " bars ago" : "—"
+    color  divCol = lastDivType == "BULL" ? colGreen : lastDivType == "BEAR" ? colRed : txtWhite
+    string divEmoji = lastDivType == "BULL" ? "🟢" : lastDivType == "BEAR" ? "🔴" : "⚪"
+
+    table.cell(statusTbl, 0, row, "Divergence", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="RSI Divergence Detection\n\n• BULL: Price ↓ + RSI ↑ (potential reversal up)\n• BEAR: Price ↑ + RSI ↓ (potential reversal down)\n\nRSI Period: " + str.tostring(i_divRsiLen) + "\nPivot Lookback: " + str.tostring(i_divLookback) + "\n\nFeeds the Confidence Score above (up to 4 pts, bonus if aligned with signal, penalty if opposed)")
+    table.cell(statusTbl, 1, row, divStatus + " | " + divBarsAgo, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Last Divergence: " + lastDivType + "\nBars ago: " + str.tostring(barsSinceDiv) + "\n\n• Bullish divergence often signals bottom\n• Bearish divergence often signals top")
+    table.cell(statusTbl, 2, row, divEmoji, text_color=divCol, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // Prediction Row (if enabled)
+    if i_enablePrediction
+        int predSamplesAll = array.size(pred_all_durations)
+        int predBullCount = array.size(pred_bull_durations)
+        int predBearCount = array.size(pred_bear_durations)
+        // Check if current direction has enough samples (need 3 of SAME type)
+        int currentDirSamples = pred_is_bullish ? predBullCount : predBearCount
+        string currentDir = pred_is_bullish ? "BULL" : "BEAR"
+        bool canPredict = not na(pred_end)
+
+        string predPrefix = pred_using_fallback ? "~" : ""
+        string predStatus = not canPredict ? "Collecting " + currentDir + "..." : predPrefix + str.tostring(int(pred_avg)) + " avg / " + str.tostring(int(pred_end)) + " max bars"
+        string predEmoji = not canPredict ? "⏳" : pred_using_fallback ? "🔮❓" : "🔮"
+        color predCol = not canPredict ? colYellow : pred_using_fallback ? colYellow : colGreen
+
+        // Calculate success rate from last 10
+        int successes = 0
+        int total = math.min(10, math.min(array.size(pred_last10_actual), array.size(pred_last10_predicted)))
+        if total > 0
+            for i = 0 to total - 1
+                if array.get(pred_last10_actual, i) <= int(array.get(pred_last10_predicted, i))
+                    successes += 1
+        float successRate = total > 0 ? (float(successes) / float(total)) * 100 : 0
+
+        string predTooltip = "🔮 Trend Duration Prediction\n\nMode: " + i_predMode +
+                             "\nCurrent direction: " + currentDir +
+                             "\n\n📊 Historical Data:" +
+                             "\n• Bull trends: " + str.tostring(predBullCount) + (pred_is_bullish ? " ← need 3+" : "") +
+                             "\n• Bear trends: " + str.tostring(predBearCount) + (not pred_is_bullish ? " ← need 3+" : "") +
+                             "\n• Total: " + str.tostring(predSamplesAll) +
+                             "\n\n" + (currentDirSamples >= 3 ? "✅ Ready to predict " + currentDir + " trends" :
+                                       pred_using_fallback ? "⚠️ Using combined bull+bear estimate (only " + str.tostring(currentDirSamples) + "/3 " + currentDir + " trends so far)" :
+                                       "⏳ Need " + str.tostring(3 - currentDirSamples) + " more " + currentDir + " trends") +
+                             "\n\nSuccess Rate: " + str.tostring(successRate, "0.0") + "% (last 10)"
+
+        string avgStr = na(pred_avg) ? "—" : str.tostring(int(pred_avg))
+        string maxStr = na(pred_end) ? "—" : str.tostring(int(pred_end))
+        string cellTooltip = "Current " + currentDir + " trend: " + str.tostring(pred_current_bars) + " bars\n\n" +
+                             "Predicted Avg: " + avgStr + " bars\n" +
+                             "Predicted Max: " + maxStr + " bars" +
+                             (pred_using_fallback ? "\n\n⚠️ Estimate based on combined bull+bear history (not enough " + currentDir + "-only samples yet)" : "")
+        if not canPredict
+            cellTooltip := "Collecting " + currentDir + " data...\n\n" +
+                           "Need 3+ completed " + currentDir + " trends\n" +
+                           "to predict " + currentDir + " duration.\n\n" +
+                           "Current: " + str.tostring(currentDirSamples) + "/3 " + currentDir + " trends\n\n" +
+                           "Current trend: " + str.tostring(pred_current_bars) + " bars"
+
+        table.cell(statusTbl, 0, row, "Prediction", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip=predTooltip)
+        table.cell(statusTbl, 1, row, predStatus, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip=cellTooltip)
+        table.cell(statusTbl, 2, row, predEmoji, text_color=predCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Risk Calculator Row (always show if enabled)
+    if i_showRisk
+        // Recalculate position size with current values
+        float tblEntry = not na(entryPx) ? entryPx : close
+        float tblSL = not na(slPrice) ? slPrice : close - slATR * 1.5
+        float tblRiskPerShare = math.abs(tblEntry - tblSL)
+        // Use risk mode (% of Account or Fixed Amount)
+        float tblRiskAmount = i_riskMode == "Fixed Amount" ? i_riskFixed : i_accountSize * (i_riskPct / 100)
+        float tblShares = tblRiskPerShare > 0 ? math.floor(tblRiskAmount / tblRiskPerShare) : 0
+        float tblPosValue = tblShares * tblEntry
+        float tblMaxLoss = tblShares * tblRiskPerShare
+
+        string sharesText = str.tostring(tblShares, "#") + " shares"
+        
+        // Display text based on risk mode
+        string riskText = i_riskMode == "Fixed Amount" ?
+                          "R: " + currSymbol + str.tostring(tblRiskAmount, "#") :
+                          "R: " + str.tostring(i_riskPct, "0.0") + "%"
+        color riskCol = tblShares > 0 ? colGreen : colYellow
+
+        // Tooltip based on risk mode
+        string riskTooltip = i_riskMode == "Fixed Amount" ?
+                             "Risk Calculator\n\nMode: Fixed Amount\nRisk: " + currSymbol + str.tostring(i_riskFixed, "#") + " per trade\n\nBased on current Entry/SL distance" :
+                             "Risk Calculator\n\nMode: % of Account\nAccount: " + currSymbol + str.tostring(i_accountSize, "#,###") + "\nRisk: " + str.tostring(i_riskPct, "0.0") + "% = " + currSymbol + str.tostring(tblRiskAmount, "#") + "\n\nBased on current Entry/SL distance"
+        table.cell(statusTbl, 0, row, "Position", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip=riskTooltip)
+        table.cell(statusTbl, 1, row, sharesText + " | " + riskText, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="POSITION SIZING:\n\nEntry: " + str.tostring(tblEntry, "#.##") + "\nStop Loss: " + str.tostring(tblSL, "#.##") + "\nRisk/Share: $" + str.tostring(tblRiskPerShare, "#.##") + "\n\nShares: " + str.tostring(tblShares, "#") + "\nPosition Value: $" + str.tostring(tblPosValue, "#,###") + "\nMax Loss: " + currSymbol + str.tostring(tblMaxLoss, "#") + "\n\nCurrency: " + i_accountCurrency + "\nExchange Rate: " + str.tostring(exchangeRate, "0.00"))
+        table.cell(statusTbl, 2, row, "🧮", text_color=riskCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // ADX Regime (always show if Layer 1 enabled)
+    if i_enableLayer1 
+        string adxTxt = "Strength: " + str.tostring(_adxVal, "0.0")
+        string adxEmoji = _regimePass ? "✅" : "❌"
+        color  adxCol = _regimePass ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "ADX Regime", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="ADX (Average Directional Index)\nMeasures trend strength in the market.\nHigh value = strong trend, Low value = sideways market.")
+        table.cell(statusTbl, 1, row, adxTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="ADX = " + adxTxt + " | Threshold = " + str.tostring(i_adxThreshold) + "\n• ✅ Trending: ADX ≥ " + str.tostring(i_adxThreshold) + "\n• ❌ Choppy: ADX < " + str.tostring(i_adxThreshold) + " (signals blocked)")
+        table.cell(statusTbl, 2, row, adxEmoji, text_color=adxCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Cooldown
+    if i_cooldownBars > 0
+        int barsSince = na(lastSignalBar) ? 999 : bar_index - lastSignalBar
+        string cdTxt = _cooldownPass ? str.tostring(barsSince) + " bars" : str.tostring(barsSince) + "/" + str.tostring(i_cooldownBars)
+        string cdEmoji = _cooldownPass ? "✅" : "❌"
+        color  cdCol = _cooldownPass ? colGreen : colYellow
+        table.cell(statusTbl, 0, row, "Cooldown", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Cooldown Period\nPrevents rapid consecutive signals.\nRequires minimum bars between signals.")
+        table.cell(statusTbl, 1, row, "Period: " +  cdTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Bars since last signal: " + str.tostring(barsSince) + "\nRequired: " + str.tostring(i_cooldownBars) + " bars\n• ✅ Cooldown passed\n• ❌ Still in cooldown (signals blocked)")
+        table.cell(statusTbl, 2, row, cdEmoji, text_color=cdCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // High Volatility Filter
+    if i_useVolatility
+        string volRatioTxt = str.tostring(volatilityRatio, "0.00") + "×"
+        string highVolEmoji = isHighVol ? "✅" : "❌"
+        color  highVolCol = isHighVol ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "High Vol Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="High Volatility Filter\nDetects when current ATR is above average.\nOnly allows signals in volatile market conditions.")
+        table.cell(statusTbl, 1, row, volRatioTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="ATR ratio: " + volRatioTxt + " average\nThreshold: " + str.tostring(i_volThresh, "0.0") + "×\n• ✅ High volatility (signals allowed)\n• ❌ Low volatility (signals blocked)")
+        table.cell(statusTbl, 2, row, highVolEmoji, text_color=highVolCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Swing Filter
+    if utUseSwingFilter
+        bool swingOk = barbuy ? _swingPassBuy : _swingPassSell
+        string swEmoji = swingOk ? "✅" : "❌"
+        color  swCol = swingOk ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "Swing Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Swing Structure Filter\nChecks price alignment with recent swing high/low.\nPrevents entries against local trend structure.")
+        table.cell(statusTbl, 1, row, str.tostring(swingLen) + " bars", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Swing structure check (Lookback: " + str.tostring(swingLen) + " bars)\n• ✅ Price aligned with swing\n• ❌ Price against swing structure")
+        table.cell(statusTbl, 2, row, swEmoji, text_color=swCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Full Candle Filter
+    if i_useFullCandle
+        bool fullCandleOk = barbuy ? fullCandleBuyOk : fullCandleSellOk
+        string fcEmoji = fullCandleOk ? "✅" : "❌"
+        color  fcCol = fullCandleOk ? colGreen : colRed
+        string fcStatus = fullCandleOk ? "Clear" : "Straddling"
+        table.cell(statusTbl, 0, row, "Full Candle", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Full Candle Confirmation\nRequires entire candle above/below UT line.\n\n• BUY: Low must be above trailing stop\n• SELL: High must be below trailing stop\n\nPrevents signals on candles 'straddling' the line")
+        table.cell(statusTbl, 1, row, fcStatus, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Full Candle Check:\n• Clear: Entire candle is on one side of UT line\n• Straddling: Candle crosses the UT line\n\n" + (barbuy ? "BUY requires: Low > UT Line" : "SELL requires: High < UT Line"))
+        table.cell(statusTbl, 2, row, fcEmoji, text_color=fcCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Volume Filter
+    if i_useVolFilter
+        string volTxt = str.tostring(_volRatio, "0.00") + "×"
+        string volEmoji = _volumePass ? "✅" : "❌"
+        color  volCol = _volumePass ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "Volume Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Volume Filter\nRequires above-average volume to confirm signals.\nHigher volume = stronger confirmation of move.")
+        table.cell(statusTbl, 1, row, volTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Volume ratio: " + volTxt + " average\nThreshold: " + str.tostring(i_volThreshold, "0.0") + "×\n• ✅ Volume above threshold\n• ❌ Low volume (signal blocked)")
+        table.cell(statusTbl, 2, row, volEmoji, text_color=volCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // RSI Filter
+    if i_useRsiFilter
+        string rsiTxt = str.tostring(_rsiVal, "0.0")
+        bool rsiOk = barbuy ? _rsiPassBuy : _rsiPassSell
+        string rsiEmoji = rsiOk ? "✅" : "❌"
+        color  rsiCol = rsiOk ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "RSI Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="RSI (Relative Strength Index)\nMeasures momentum and identifies overbought/oversold.\nBlocks buys in OB zone and sells in OS zone.")
+        table.cell(statusTbl, 1, row, rsiTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="RSI = " + rsiTxt + "\nOverbought: " + str.tostring(i_rsiOB) + " | Oversold: " + str.tostring(i_rsiOS) + "\n• ✅ RSI confirms direction\n• ❌ RSI blocks signal (OB/OS zone)")
+        table.cell(statusTbl, 2, row, rsiEmoji, text_color=rsiCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Hull MA Filter
+    if i_useHullConfirm
+        bool hullOk = barbuy ? checkHullFilter(true) : checkHullFilter(false)
+        string hullEmoji = hullOk ? "✅" : "❌"
+        color  hullCol = hullOk ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "Hull MA Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Hull Moving Average\nFast moving average with reduced lag.\nRequires price above/below Hull MA to confirm direction.")
+        table.cell(statusTbl, 1, row, str.tostring(i_hullPeriod) + " period", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Hull MA Confirmation (Period: " + str.tostring(i_hullPeriod) + ")\n• ✅ Price aligned with Hull MA\n• ❌ Price against Hull MA (signal blocked)")
+        table.cell(statusTbl, 2, row, hullEmoji, text_color=hullCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // SuperTrend Filter (Engine with Strength)
+    if i_useSuperTrend
+        bool stOk = barbuy ? stBullish : stBearish
+        string stEmoji = stOk ? "✅" : "❌"
+        color  stCol = stOk ? colGreen : colRed
+        string stTrend = stBullish ? "BULL 🟢" : "BEAR 🔴"
+        string stStrengthTxt = str.tostring(stStrength, "0") + "%"
+        table.cell(statusTbl, 0, row, "SuperTrend", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="SuperTrend Engine\nClassic trend-following indicator with strength scoring.\n\nStrength = Distance from ST line ÷ ATR × 25\nHigher = Stronger trend confirmation")
+        table.cell(statusTbl, 1, row, stTrend + " | " + stStrengthTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="SuperTrend: " + (stBullish ? "BULLISH" : "BEARISH") + "\nStrength: " + stStrengthTxt + "\n\nATR Period: " + str.tostring(i_stAtrPeriod) + "\nMultiplier: " + str.tostring(i_stMult, "0.0") + "×\n\n• ✅ Signal aligned with SuperTrend\n• ❌ Signal against SuperTrend (blocked)")
+        table.cell(statusTbl, 2, row, stEmoji, text_color=stCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // Structure Break Engine (always show - part of consensus)
+    bool sbOk = barbuy ? sbBullish : sbBearish
+    string sbEmoji = sbOk ? "✅" : "❌"
+    color  sbCol = sbOk ? colGreen : colRed
+    string sbTrend = sbBullishBreak ? "BREAK ↑" : sbBearishBreak ? "BREAK ↓" : sbBullish ? "BULL" : "BEAR"
+    string sbStrengthTxt = str.tostring(sbStrength, "0") + "%"
+    table.cell(statusTbl, 0, row, "Structure", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Structure Analysis\n\nBREAK ↑ = Closed above swing high\nBREAK ↓ = Closed below swing low\nBULL = Above midpoint of range\nBEAR = Below midpoint of range\n\nStrength = Position within range (0-100%)")
+    table.cell(statusTbl, 1, row, sbTrend + " | " + sbStrengthTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+               tooltip="Structure: " + sbTrend + "\nStrength: " + sbStrengthTxt + "\n\nSwing High: " + str.tostring(sbSwingHigh, "#.##") + "\nSwing Low: " + str.tostring(sbSwingLow, "#.##") + "\nMidpoint: " + str.tostring(sbMid, "#.##") + "\nLookback: " + str.tostring(swingLen) + " bars\n\n• ✅ Structure supports direction\n• ❌ Structure opposes direction")
+    table.cell(statusTbl, 2, row, sbEmoji, text_color=sbCol, text_size=tableSize, text_halign=text.align_center)
+    row += 1
+
+    // S/R Zones (persistent pivot-clustered zones, separate from the rolling Structure line above)
+    if utShowZones
+        string zoneStatus = nearResistance and nearSupport ? "BOTH ⚠️" : nearResistance ? "RESISTANCE (" + str.tostring(nearResTouches) + "×)" : nearSupport ? "SUPPORT (" + str.tostring(nearSupTouches) + "×)" : "Clear"
+        string zoneEmoji = nearResistance ? "🔴" : nearSupport ? "🟢" : "⚪"
+        color  zoneCol = nearResistance ? colRed : nearSupport ? colGreen : txtWhite
+        string zoneTooltip = "Support/Resistance Zones\n\nClusters significant pivot highs/lows (pivot strength: " + str.tostring(i_zonePivotLen) + " bars each side) into persistent zones. Only the nearest resistance ABOVE and nearest support BELOW price are drawn.\n\nZone width: ±" + str.tostring(zoneTol, "#.##") + " (" + str.tostring(i_zoneWidthMult, "0.0") + "× ATR)\nResistance zones tracked: " + str.tostring(array.size(zoneResPrice)) + "\nSupport zones tracked: " + str.tostring(array.size(zoneSupPrice)) + "\n\n" + (i_useZoneFilter ? "FILTER: ON - blocks BUY inside resistance / SELL inside support" : "FILTER: OFF (display only)")
+        table.cell(statusTbl, 0, row, "S/R Zones", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip=zoneTooltip)
+        table.cell(statusTbl, 1, row, zoneStatus, text_color=zoneCol, text_size=tableSize, text_halign=text.align_left,
+                   tooltip=zoneTooltip)
+        table.cell(statusTbl, 2, row, zoneEmoji, text_color=zoneCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // 2-Bar Confirm
+    if utUseDelay
+        table.cell(statusTbl, 0, row, "2-Bar Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="2-Bar Confirmation\nRequires 2 consecutive bars in same direction.\nAdds slight lag but reduces false signals.")
+        table.cell(statusTbl, 1, row, "ON", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="2-Bar Confirmation active\n• Requires 2 consecutive bars to confirm trend\n• Adds lag but reduces false signals")
+        table.cell(statusTbl, 2, row, "⚡", text_color=colYellow, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+    // % Filter
+    if utUsePctFilter
+        float pctChg = math.abs(close - close[1]) / close[1] * 100
+        string pctTxt = str.tostring(pctChg, "0.00") + "%"
+        bool pctOk = pctChg > thr
+        string pctEmoji = pctOk ? "✅" : "❌"
+        color  pctCol = pctOk ? colGreen : colRed
+        table.cell(statusTbl, 0, row, "% Change Filter", text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Percent Change Filter\nRequires minimum price change between bars.\nFilters out insignificant small movements.")
+        table.cell(statusTbl, 1, row, pctTxt, text_color=txtWhite, text_size=tableSize, text_halign=text.align_left,
+                   tooltip="Bar change: " + pctTxt + "\nThreshold: " + str.tostring(thr, "0.00") + "%\n• ✅ Sufficient movement\n• ❌ Too small (signal blocked)")
+        table.cell(statusTbl, 2, row, pctEmoji, text_color=pctCol, text_size=tableSize, text_halign=text.align_center)
+        row += 1
+
+//END 17/07/2026 - Alerts now gated by barstate.isconfirmed (fire at bar close, in sync with the anti-repaint labels - fixes 'alert fires but signal appears later')
