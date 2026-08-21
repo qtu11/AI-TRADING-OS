@@ -829,14 +829,16 @@ function convertIndentation(code: string): string {
 
 export function transpilePineScriptToJS(pineCode: string): string {
   let code = pineCode.replace(/\r/g, "");
+
   const strings: string[] = [];
-  code = code.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (m) => {
-    strings.push(m);
-    return `__PINE_STR_${strings.length - 1}__`;
+  code = code.replace(/("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`)|(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, (match, strVal, comment) => {
+    if (strVal) {
+      strings.push(strVal);
+      return `__PINE_STR_${strings.length - 1}__`;
+    }
+    return "";
   });
 
-  code = code.replace(/\/\/.*$/gm, "");
-  code = code.replace(/\/\*[\s\S]*?\*\//g, "");
   code = code.replace(/^@version=\d+/gm, "");
   code = code.replace(/\b(?:indicator|strategy)\s*\([\s\S]*?\)/gi, "// header stripped\n");
   code = code.replace(/\b(array|map|matrix)(\.new)?\s*<[^>\n]+>/g, "$1$2");
@@ -1078,7 +1080,7 @@ export function executeCustomScript(
         const res = new Array(len).fill(false);
         for (let i = 1; i < len; i++) {
           const vA = arrA[i] ?? arrA[arrA.length - 1];
-          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          const vB = arrB[i] ?? arrB[arrA.length - 1];
           const prevA = arrA[i - 1] ?? vA;
           const prevB = arrB[i - 1] ?? vB;
           res[i] = vA > vB && prevA <= prevB;
@@ -1092,7 +1094,7 @@ export function executeCustomScript(
         const res = new Array(len).fill(false);
         for (let i = 1; i < len; i++) {
           const vA = arrA[i] ?? arrA[arrA.length - 1];
-          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          const vB = arrB[i] ?? arrB[arrA.length - 1];
           const prevA = arrA[i - 1] ?? vA;
           const prevB = arrB[i - 1] ?? vB;
           res[i] = vA < vB && prevA >= prevB;
@@ -1106,7 +1108,7 @@ export function executeCustomScript(
         const res = new Array(len).fill(false);
         for (let i = 1; i < len; i++) {
           const vA = arrA[i] ?? arrA[arrA.length - 1];
-          const vB = arrB[i] ?? arrB[arrB.length - 1];
+          const vB = arrB[i] ?? arrB[arrA.length - 1];
           res[i] = vA === vB;
         }
         return res;
@@ -1121,13 +1123,13 @@ export function executeCustomScript(
     };
 
     const str = {
-      tostring: (val: any, format?: string) => {
+      tostring: (val: any, fmt?: string) => {
         if (val === null || val === undefined) return "";
         const num = typeof val === "number" ? val : val?.valueOf ? Number(val.valueOf()) : NaN;
         if (!isNaN(num)) {
-          if (format === "#") return String(Math.round(num));
-          if (format === "#.#") return num.toFixed(1);
-          if (format === "#.##" || format === "#.2f") return num.toFixed(2);
+          if (fmt === "#" || fmt === "0") return String(Math.round(num));
+          if (fmt === "#.#" || fmt === "0.0") return num.toFixed(1);
+          if (fmt === "#.##" || fmt === "#.2f" || fmt === "0.00" || fmt === "#.####") return num.toFixed(2);
           return String(num);
         }
         return String(val);
@@ -1251,6 +1253,9 @@ export function executeCustomScript(
         const factor = maxVal === minVal ? 0.5 : Math.max(0, Math.min(1, (val - minVal) / (maxVal - minVal)));
         return factor > 0.5 ? col2 : col1;
       },
+      r: (c: string) => 0,
+      g: (c: string) => 0,
+      b: (c: string) => 0,
     };
 
     const text = {
@@ -1286,6 +1291,7 @@ export function executeCustomScript(
       labeldown: "arrowDown",
       arrowup: "arrowUp",
       arrowdown: "arrowDown",
+      diamond: "circle",
     };
 
     const location = {
@@ -1338,6 +1344,20 @@ export function executeCustomScript(
     const display = { none: 0, all: 1, pane: 2, data_window: 3, status_line: 4 };
     const order = { ascending: 0, descending: 1 };
     const barmerge = { lookahead_off: 0, lookahead_on: 1, gaps_off: 0, gaps_on: 1 };
+
+    const ticker = {
+      heikinashi: (sym: string) => sym,
+      standard: (sym: string) => sym,
+      renko: (sym: string) => sym,
+      pointfigure: (sym: string) => sym,
+    };
+
+    const format = {
+      mintick: "#.##",
+      percent: "#.##%",
+      volume: "#",
+      price: "#.##",
+    };
 
     const input: any = Object.assign(
       (defVal: any, title?: string) => defVal,
@@ -1512,22 +1532,34 @@ export function executeCustomScript(
       delete: () => {},
     };
 
-    const plot = (seriesData: any, title: string = "Plot", options?: { color?: string; lineWidth?: number; overlay?: boolean }) => {
-      const col = options?.color || "#38BDF8";
-      const lineWidth = options?.lineWidth || 2;
-      const overlay = options?.overlay !== false;
-      const data: LineData<UTCTimestamp>[] = [];
-      if (Array.isArray(seriesData)) {
-        for (let i = 0; i < targetCandles.length; i++) {
-          const val = seriesData[i];
-          if (!isNaN(val) && val !== null && val !== undefined) {
-            data.push({ time: targetCandles[i].time, value: Number(val.toFixed(5)) });
+    const plot: any = Object.assign(
+      (seriesData: any, title: string = "Plot", options?: { color?: string; lineWidth?: number; overlay?: boolean }) => {
+        const col = typeof options === "string" ? options : options?.color || "#38BDF8";
+        const lineWidth = typeof options === "object" ? options?.lineWidth || 2 : 2;
+        const overlay = typeof options === "object" ? options?.overlay !== false : true;
+        const data: LineData<UTCTimestamp>[] = [];
+        if (Array.isArray(seriesData)) {
+          for (let i = 0; i < targetCandles.length; i++) {
+            const val = seriesData[i];
+            if (!isNaN(val) && val !== null && val !== undefined) {
+              data.push({ time: targetCandles[i].time, value: Number(val.toFixed(5)) });
+            }
           }
         }
+        plots.push({ id: `plot-${plots.length + 1}-${title.replace(/\s+/g, "_")}`, title, color: col, lineWidth, data, overlay });
+        return seriesData;
+      },
+      {
+        style_line: 0,
+        style_linebr: 1,
+        style_stepline: 2,
+        style_histogram: 3,
+        style_cross: 4,
+        style_area: 5,
+        style_columns: 6,
+        style_circles: 7,
       }
-      plots.push({ id: `plot-${plots.length + 1}-${title.replace(/\s+/g, "_")}`, title, color: col, lineWidth, data, overlay });
-      return seriesData;
-    };
+    );
 
     const plotshape = (condition: any, options?: { title?: string; text?: string; style?: any; location?: any; color?: string; size?: number }) => {
       const title = options?.title || "Signal";
@@ -1566,7 +1598,7 @@ export function executeCustomScript(
     const transpiledCode = transpilePineScriptToJS(scriptCode);
     const context: any = {
       open: opens, high: highs, low: lows, close: closes, volume: volumes, hlc3, hl2, ohlc4, candles: targetCandles,
-      ta, str, math, array, map, matrix, color, text, shape, location, size, position, extend, xloc, yloc, display, order, barmerge, chart,
+      ta, str, math, array, map, matrix, color, text, shape, location, size, position, extend, xloc, yloc, display, order, barmerge, chart, ticker, format,
       input, box, line, label, request, syminfo, timeframe, barstate, bar_index, last_bar_index, timenow, time, year, month, dayofmonth, dayofweek, hour, minute, second, timestamp,
       table, plot, plotshape, hline, addDashboardCard, nz, na, fixnan, float, int, bool, string, fill, barcolor, bgcolor, max_bars_back, plotcandle, plotbar, plotchar, alertcondition,
       Math, console: { log: (...args: any[]) => logs.push(args.map(String).join(" ")) }

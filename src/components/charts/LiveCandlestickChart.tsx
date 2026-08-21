@@ -39,6 +39,9 @@ import {
   Columns,
   ArrowUpRight,
   ArrowDownRight,
+  Eye,
+  EyeOff,
+  X,
 } from "lucide-react";
 
 // Danh mục Symbol thanh khoản cao chuẩn xác
@@ -280,6 +283,7 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
   const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
   const [activeScriptCode, setActiveScriptCode] = useState<string>("");
   const [activeIndicatorName, setActiveIndicatorName] = useState<string>("");
+  const [isCustomIndicatorVisible, setIsCustomIndicatorVisible] = useState<boolean>(true);
   const [scriptResult, setScriptResult] = useState<ScriptExecutionResult | null>(null);
   const customPlotSeriesRef = useRef<Record<string, any>>({});
   const customPriceLinesRef = useRef<any[]>([]);
@@ -382,7 +386,7 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
     }
 
     // Custom Pine Script Engine Execution & Rendering
-    if (activeScriptCode && chartRef.current && candleSeriesRef.current) {
+    if (activeScriptCode && isCustomIndicatorVisible && chartRef.current && candleSeriesRef.current) {
       const res = executeCustomScript(activeScriptCode, list);
       setScriptResult(res);
 
@@ -395,9 +399,13 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
               lineWidth: (p.lineWidth || 2) as any,
               title: p.title,
             });
-            customPlotSeriesRef.current[p.id] = series;
+            if (series) {
+              customPlotSeriesRef.current[p.id] = series;
+            }
           }
-          customPlotSeriesRef.current[p.id]?.setData(p.data);
+          if (customPlotSeriesRef.current[p.id] && p.data && p.data.length > 0) {
+            customPlotSeriesRef.current[p.id].setData(p.data);
+          }
         });
 
         // Set Buy/Sell markers
@@ -427,6 +435,8 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
           if (pl) customPriceLinesRef.current.push(pl);
         });
       }
+    } else if (!isCustomIndicatorVisible) {
+      clearCustomSeries();
     }
 
     if (chartRef.current) {
@@ -440,8 +450,15 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
   const handleApplyScript = (code: string, result: ScriptExecutionResult, name: string) => {
     setActiveScriptCode(code);
     setActiveIndicatorName(name);
+    setIsCustomIndicatorVisible(true);
     setScriptResult(result);
     clearCustomSeries();
+    // Turn off standard SMA lines to highlight the loaded custom indicator clearly
+    setIndicators((prev) => ({
+      ...prev,
+      sma20: false,
+      sma50: false,
+    }));
     if (candlesRef.current.length > 0) {
       populateSeriesData(candlesRef.current);
     }
@@ -461,6 +478,8 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
 
     chartContainerRef.current.innerHTML = "";
     if (rsiContainerRef.current) rsiContainerRef.current.innerHTML = "";
+    customPlotSeriesRef.current = {};
+    customPriceLinesRef.current = [];
 
     const bgColor = isDark ? "#0E141B" : "#FFFFFF";
     const textColor = isDark ? "#94A3B8" : "#475569";
@@ -924,6 +943,83 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
 
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[10px] text-txt-muted uppercase font-bold mr-1">{isVi ? "Chỉ Báo:" : "Indicators:"}</span>
+
+            {/* Prominent Active Custom Indicator Pill */}
+            {activeIndicatorName ? (
+              <div
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-xl border text-[11px] font-bold transition-all shadow-sm ${
+                  isCustomIndicatorVisible
+                    ? "bg-brand-500/20 text-brand-400 border-brand-500/60 shadow-brand-500/15"
+                    : "bg-bg-surface text-txt-muted border-border opacity-70"
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    isCustomIndicatorVisible ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"
+                  }`}
+                />
+                <span className="truncate max-w-[200px] text-txt-primary" title={activeIndicatorName}>
+                  ⚡ {activeIndicatorName}
+                </span>
+                <button
+                  onClick={() => {
+                    soundFX.playClick();
+                    setIsCustomIndicatorVisible(!isCustomIndicatorVisible);
+                    if (candlesRef.current.length > 0) {
+                      populateSeriesData(candlesRef.current);
+                    }
+                  }}
+                  title={
+                    isCustomIndicatorVisible
+                      ? isVi
+                        ? "Ẩn chỉ báo khỏi chart"
+                        : "Hide indicator"
+                      : isVi
+                      ? "Hiện chỉ báo lên chart"
+                      : "Show indicator"
+                  }
+                  className="p-1 rounded hover:bg-brand-500/20 hover:text-white transition-colors cursor-pointer"
+                >
+                  {isCustomIndicatorVisible ? (
+                    <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <EyeOff className="w-3.5 h-3.5 text-txt-muted" />
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    soundFX.playClick();
+                    setIsScriptModalOpen(true);
+                  }}
+                  title={isVi ? "Chỉnh sửa script & thông số" : "Edit script & settings"}
+                  className="p-1 rounded hover:bg-brand-500/20 hover:text-white transition-colors cursor-pointer"
+                >
+                  <Sliders className="w-3.5 h-3.5 text-brand-400" />
+                </button>
+                <button
+                  onClick={() => {
+                    soundFX.playSwitch();
+                    handleClearScript();
+                  }}
+                  title={isVi ? "Gỡ bỏ chỉ báo này" : "Remove indicator"}
+                  className="p-1 rounded hover:bg-rose-500/20 hover:text-rose-400 transition-colors cursor-pointer ml-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  soundFX.playClick();
+                  setIsScriptModalOpen(true);
+                }}
+                className="px-3 py-1 rounded-xl border border-dashed border-brand-500/50 bg-brand-500/10 text-brand-400 hover:bg-brand-500/20 hover:text-white text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+              >
+                <Code className="w-3.5 h-3.5" />
+                <span>{isVi ? "+ Nạp Chỉ Báo (Pine Script)" : "+ Load Indicator"}</span>
+              </button>
+            )}
+
             <button
               onClick={() => toggleIndicator("sma20")}
               className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-all cursor-pointer ${
@@ -971,27 +1067,6 @@ export const LiveCandlestickChart: React.FC<LiveCandlestickChartProps> = ({
               }`}
             >
               RSI (14)
-            </button>
-
-            {/* Custom Script Pine Engine Trigger Button */}
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                setIsScriptModalOpen(true);
-              }}
-              className={`px-3 py-1.5 rounded-xl border text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm ${
-                activeScriptCode
-                  ? "bg-brand-500 text-white border-brand-400 shadow-brand-500/25"
-                  : "bg-brand-500/10 text-brand-400 border-brand-500/40 hover:bg-brand-500/20 hover:text-white"
-              }`}
-            >
-              <Code className="w-3.5 h-3.5" />
-              <span className="truncate max-w-[180px]">
-                {activeIndicatorName ? activeIndicatorName : isVi ? "Nạp Script (Pine)" : "Custom Script"}
-              </span>
-              {activeScriptCode && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              )}
             </button>
           </div>
         </div>
